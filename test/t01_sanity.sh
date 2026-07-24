@@ -62,6 +62,22 @@ t_rc 'goto.sh -h exits 0' 0 "$t_status"
 t_like 'goto.sh -h shows usage' "$t_out" 'Usage'
 t_like 'goto.sh -h shows the environment knobs' "$t_out" 'GOTO_EMIT'
 
+# --- sourcing from a non-bash shell must not kill it -----------------------
+if command -v zsh > /dev/null; then
+	t_run zsh -c "source '$root/goto.sh'; echo \"alive rc=\$?\""
+	t_like 'sourcing from zsh refuses politely' "$t_err" \
+	    'this is a bash tool'
+	t_is 'sourcing from zsh leaves the shell alive' "$t_out" \
+	    'alive rc=2'
+	t_run zsh -c "source '$root/goto_trap.sh'; echo \"alive rc=\$?\""
+	t_is 'sourcing goto_trap from zsh leaves the shell alive' \
+	    "$t_out" 'alive rc=2'
+else
+	t_ok 'zsh not installed here - zsh guard check skipped'
+	t_ok 'zsh not installed here - zsh guard check skipped (alive)'
+	t_ok 'zsh not installed here - zsh guard check skipped (trap)'
+fi
+
 # --- version ---------------------------------------------------------------
 t_run bash "$root/goto.sh" -V
 t_rc 'goto.sh -V exits 0' 0 "$t_status"

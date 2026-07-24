@@ -56,6 +56,18 @@
 # (SC2016: single-quoted strings with $ are emitted-code literals that must
 #  not expand here; SC1003: '\' is a deliberate one-character backslash.)
 
+# sourced by zsh or another non-bash shell?  refuse politely: an `exit`
+# here would close the user's interactive shell (macOS defaults to zsh)
+if [[ -z ${BASH_VERSION-} ]]; then
+	printf 'goto.sh: this is a bash tool and cannot run under this\n' >&2
+	printf 'shell; put `source goto.sh` in a bash script, or try:\n' >&2
+	printf '  bash examples/01_forward_and_backward.sh\n' >&2
+	return 2 2>/dev/null
+	# shellcheck disable=SC2317
+	# (reached when goto.sh is *executed* by a non-bash shell)
+	exit 2
+fi
+
 # the runtimes lean on bash 5 behavior (negative array subscripts, mapfile,
 # BASHPID, extdebug details); fail loudly instead of confusingly on old bash
 if (( BASH_VERSINFO[0] < 5 )); then

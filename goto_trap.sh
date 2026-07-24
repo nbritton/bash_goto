@@ -34,6 +34,15 @@
 # Environment:  GOTO_STRICT=0 disables the runtime subshell guard, as in
 #               goto.sh.
 
+# sourced by zsh or another non-bash shell?  refuse politely: an `exit`
+# here would close the user's interactive shell (macOS defaults to zsh)
+if [[ -z ${BASH_VERSION-} ]]; then
+	printf 'goto_trap.sh: this is a bash tool; source it from the\n' >&2
+	printf 'first line of a bash script\n' >&2
+	return 2 2>/dev/null
+	exit 2
+fi
+
 if (( BASH_VERSINFO[0] < 5 )); then
 	printf 'goto_trap.sh: bash >= 5 required (this is bash %s)\n' \
 	    "$BASH_VERSION" >&2

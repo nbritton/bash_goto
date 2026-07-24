@@ -7,7 +7,7 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## [1.0.0] - 2026-07-24
 
 First public release: the compiler and trap runtimes brought into full
-conformance with `bash-style-guide.md`, a 371-assertion test suite, a man
+conformance with `bash-style-guide.md`, a 374-assertion test suite, a man
 page, and packaging.
 
 ### Added
