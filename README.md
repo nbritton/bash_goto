@@ -27,7 +27,7 @@ Nothing to build:
 ```
 git clone https://github.com/nbritton/bash_goto
 cd bash_goto
-make test            # run the QA suite (374 checks)
+make test            # run the QA suite (383 checks)
 sudo make install    # scripts to /usr/local/bin, man pages installed
 make uninstall       # remove them; PREFIX=... relocates both targets
 ```
@@ -339,7 +339,7 @@ test/run_tests.sh              # the whole suite (exits nonzero on failure)
 test/run_tests.sh style        # just the files matching "style"
 ```
 
-The suite is 374 assertions: a mechanical style-guide lint (which the
+The suite is 383 assertions: a mechanical style-guide lint (which the
 test files themselves must pass), unit tests for each compiler pass,
 every diagnostic and invocation mode, and byte-exact goldens for the
 emitted trampolines — including emissions of style-variant fixture

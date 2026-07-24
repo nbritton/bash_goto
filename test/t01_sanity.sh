@@ -36,6 +36,16 @@ for f in "$root"/goto.sh "$root"/goto_trap.sh "$root"/examples/*.sh \
 	fi
 done
 
+# --- executable bits (a lost file mode breaks shebang-interpreter use) -----
+for f in "$root"/goto.sh "$root"/goto_trap.sh "$root"/examples/*.sh \
+	./run_tests.sh; do
+	if [[ -x $f ]]; then
+		t_ok "executable: ${f#"$root"/}"
+	else
+		t_not_ok "executable: ${f#"$root"/}"
+	fi
+done
+
 # --- library mode ---------------------------------------------------------
 t_run bash -c "source '$root/goto.sh' --lib
 declare -F goto_compile > /dev/null || exit 3
