@@ -11,7 +11,7 @@ source ./lib.sh
 root=..
 rootabs=$(cd "$root" && pwd) || exit 1
 
-tmp=$(mktemp -d)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/goto-t.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 
 # --- the six examples against their golden outputs ------------------------
@@ -35,13 +35,21 @@ printf 'echo "argc=$# argv=$*"\ngoto e\nlabel e\necho "arg1=$1"\n' \
 t_run bash "$root/goto.sh" "$tmp/args.sh" alpha 'b c'
 t_is 'file mode preserves "$@"' "$t_out" $'argc=2 argv=alpha b c\narg1=alpha'
 
-printf '#!%s\necho via shebang\ngoto s\necho no\nlabel s\necho jumped\n' \
-	"$rootabs/goto.sh" > "$tmp/sb.sh"
-chmod +x "$tmp/sb.sh"
-t_run "$tmp/sb.sh"
-t_rc 'shebang-interpreter mode exits 0' 0 "$t_status"
-t_is 'shebang-interpreter mode runs the program' "$t_out" \
-	$'via shebang\njumped'
+# macOS's kernel does not allow a script as a shebang interpreter,
+# so this invocation mode is Linux-only
+if [[ $OSTYPE == darwin* ]]; then
+	t_ok 'shebang-interpreter mode (skipped: not supported on macOS)'
+	t_ok 'shebang-interpreter output (skipped: not supported on macOS)'
+else
+	printf '#!%s\necho via shebang\ngoto s\necho no\n' \
+		"$rootabs/goto.sh" > "$tmp/sb.sh"
+	printf 'label s\necho jumped\n' >> "$tmp/sb.sh"
+	chmod +x "$tmp/sb.sh"
+	t_run "$tmp/sb.sh"
+	t_rc 'shebang-interpreter mode exits 0' 0 "$t_status"
+	t_is 'shebang-interpreter mode runs the program' "$t_out" \
+		$'via shebang\njumped'
+fi
 
 t_run bash fixtures/heredoc_form.sh "$rootabs"
 t_rc 'heredoc form exits 0' 0 "$t_status"

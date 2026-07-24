@@ -67,8 +67,8 @@ t_rc() {
 # capture stdout/stderr/status into t_out/t_err/t_status
 t_run() {
 	local out_f err_f
-	out_f=$(mktemp)
-	err_f=$(mktemp)
+	out_f=$(mktemp "${TMPDIR:-/tmp}/goto-t.XXXXXX")
+	err_f=$(mktemp "${TMPDIR:-/tmp}/goto-t.XXXXXX")
 	if [[ -n $t_timeout ]]; then
 		"$t_timeout" 20 "$@" > "$out_f" 2> "$err_f"
 	else

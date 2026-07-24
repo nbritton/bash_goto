@@ -136,7 +136,9 @@ outside your own loops is rejected;
 and
 .B BASH_SOURCE
 inside the compiled program refer to the eval; reading the program from
-stdin consumes stdin. Names starting with
+stdin consumes stdin. The shebang-interpreter form requires a kernel
+that accepts scripts as interpreters (Linux yes, macOS no). Names
+starting with
 .BR __gt_ ,
 .BR __GOTO_ ,
 and

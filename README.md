@@ -241,6 +241,8 @@ and pipelines are exactly the constructs a line-oriented scan gets wrong, and
   (those reference `__gt_ret` from goto.sh).
 * `goto_trap.sh` indexes duplicate labels silently (last one wins); the
   compiler rejects duplicates.
+* The shebang-interpreter form (`#!/path/to/goto.sh`) needs a kernel that
+  accepts scripts as shebang interpreters: Linux does, macOS does not.
 
 ---
 

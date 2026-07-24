@@ -15,7 +15,7 @@ cd "$here" || exit 1
 source ./lib.sh
 root=..
 
-tmp=$(mktemp -d)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/goto-t.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 
 # --- code generation is stable --------------------------------------------

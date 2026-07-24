@@ -11,7 +11,7 @@ source ./lib.sh
 root=..
 rootabs=$(cd "$root" && pwd) || exit 1
 
-tmp=$(mktemp -d)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/goto-t.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 
 # make TRAP a resolvable path for generated programs
