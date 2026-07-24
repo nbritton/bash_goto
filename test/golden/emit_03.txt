@@ -1,0 +1,47 @@
+# ---- compiled by goto.sh: 4 label(s), 5 segment(s) ----
+declare -g __GOTO_SHELL=$BASHPID __GOTO_PC=__gt_entry
+declare -ga __GOTO_STACK=()
+declare -g __GOTO_RC=0
+while :; do
+  case $__GOTO_PC in
+    (__gt_entry)
+      __GOTO_PC=dispatch
+    here=${BASH_SOURCE[0]%/*};
+    [[ $here == "${BASH_SOURCE[0]}" ]] && here=.;
+    input='aab';
+    pos=0;
+    state=S0;
+      __GOTO_RC=$?
+      ;;
+    (dispatch)
+      __GOTO_PC=state_S0
+    c=${input:pos:1};
+    (( pos++ ));
+    [[ -z $c ]] && { __GOTO_PC=halt; [[ $BASHPID == "$__GOTO_SHELL" ]] || __gt_fault halt; continue 1; };
+    { __GOTO_PC="state_$state"; [[ $BASHPID == "$__GOTO_SHELL" ]] || __gt_fault "state_$state"; continue 1; };
+      __GOTO_RC=$?
+      ;;
+    (state_S0)
+      __GOTO_PC=state_S1
+    echo "S0 saw '$c'";
+    state=S1;
+    { __GOTO_PC=dispatch; [[ $BASHPID == "$__GOTO_SHELL" ]] || __gt_fault dispatch; continue 1; };
+      __GOTO_RC=$?
+      ;;
+    (state_S1)
+      __GOTO_PC=halt
+    echo "S1 saw '$c'";
+    state=S0;
+    { __GOTO_PC=dispatch; [[ $BASHPID == "$__GOTO_SHELL" ]] || __gt_fault dispatch; continue 1; };
+      __GOTO_RC=$?
+      ;;
+    (halt)
+      __GOTO_PC=__gt_END
+    echo "halted in $state after $(( pos - 1 )) chars"
+      __GOTO_RC=$?
+      ;;
+    (__gt_END) break ;;
+    (*) printf "goto: no such label: %s\n" "$__GOTO_PC" >&2; exit 2 ;;
+  esac
+done
+(exit "$__GOTO_RC")

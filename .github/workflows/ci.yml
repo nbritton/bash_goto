@@ -1,0 +1,25 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: run the suite
+        run: bash test/run_tests.sh
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install bash 5
+        run: brew install bash
+      - name: run the suite
+        run: |
+          "$(brew --prefix)/bin/bash" test/run_tests.sh

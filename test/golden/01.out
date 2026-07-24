@@ -1,0 +1,7 @@
+line 1
+line 3
+--- backwards: a loop built out of nothing but goto ---
+iteration 0  (untouched by any re-exec)
+iteration 1  (untouched by any re-exec)
+iteration 2  (untouched by any re-exec)
+done, and $state survived: untouched by any re-exec

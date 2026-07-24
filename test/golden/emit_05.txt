@@ -1,0 +1,29 @@
+# ---- compiled by goto.sh: 1 label(s), 2 segment(s) ----
+declare -g __GOTO_SHELL=$BASHPID __GOTO_PC=__gt_entry
+declare -ga __GOTO_STACK=()
+declare -g __GOTO_RC=0
+while :; do
+  case $__GOTO_PC in
+    (__gt_entry)
+      __GOTO_PC=loop
+    shopt -s expand_aliases;
+    alias INC='(( count++ ))';
+    alias REPEAT_WHILE_UNDER='(( count < 3 )) && goto';
+    here=${BASH_SOURCE[0]%/*};
+    [[ $here == "${BASH_SOURCE[0]}" ]] && here=.;
+    count=0;
+      __GOTO_RC=$?
+      ;;
+    (loop)
+      __GOTO_PC=__gt_END
+    INC;
+    REPEAT_WHILE_UNDER loop;
+    echo "count=$count";
+    echo "(run with GOTO_EMIT=1 to see what the macros compiled to)"
+      __GOTO_RC=$?
+      ;;
+    (__gt_END) break ;;
+    (*) printf "goto: no such label: %s\n" "$__GOTO_PC" >&2; exit 2 ;;
+  esac
+done
+(exit "$__GOTO_RC")

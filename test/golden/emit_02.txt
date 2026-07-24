@@ -1,0 +1,56 @@
+# ---- compiled by goto.sh: 3 label(s), 4 segment(s) ----
+declare -g __GOTO_SHELL=$BASHPID __GOTO_PC=__gt_entry
+declare -ga __GOTO_STACK=()
+declare -g __GOTO_RC=0
+while :; do
+  case $__GOTO_PC in
+    (__gt_entry)
+      __GOTO_PC=out
+    here=${BASH_SOURCE[0]%/*};
+    [[ $here == "${BASH_SOURCE[0]}" ]] && here=.;
+    for a in 1 2 3;
+    do
+        for b in x y z;
+        do
+            echo "  $a$b";
+            [[ $a$b == 2y ]] && { __GOTO_PC=out; [[ $BASHPID == "$__GOTO_SHELL" ]] || __gt_fault out; continue 3; };
+        done;
+    done;
+    echo "not reached";
+      __GOTO_RC=$?
+      ;;
+    (out)
+      __GOTO_PC=spin
+    echo "escaped two nested loops";
+    i=0;
+      __GOTO_RC=$?
+      ;;
+    (spin)
+      __GOTO_PC=finished
+    while (( i < 9 )); do
+        case $i in 
+            0 | 1 | 2)
+                (( i++ ));
+                if (( i < 3 )); then
+                    { __GOTO_PC=spin; [[ $BASHPID == "$__GOTO_SHELL" ]] || __gt_fault spin; continue 2; };
+                else
+                    { __GOTO_PC=finished; [[ $BASHPID == "$__GOTO_SHELL" ]] || __gt_fault finished; continue 2; };
+                fi
+            ;;
+            *)
+                break
+            ;;
+        esac;
+    done;
+      __GOTO_RC=$?
+      ;;
+    (finished)
+      __GOTO_PC=__gt_END
+    echo "out of case-inside-while-inside-if, i=$i"
+      __GOTO_RC=$?
+      ;;
+    (__gt_END) break ;;
+    (*) printf "goto: no such label: %s\n" "$__GOTO_PC" >&2; exit 2 ;;
+  esac
+done
+(exit "$__GOTO_RC")

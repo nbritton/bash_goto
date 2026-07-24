@@ -1,0 +1,4 @@
+S0 saw 'a'
+S1 saw 'a'
+S0 saw 'b'
+halted in S1 after 3 chars

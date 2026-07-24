@@ -1,0 +1,176 @@
+.TH "GOTO.SH" "1" "July 2026" "goto.sh 1.0.0" "User Commands"
+.SH NAME
+goto.sh, goto_trap.sh \- real forward and backward GOTO for bash
+.SH SYNOPSIS
+.nf
+\fBsource goto.sh\fR                    (first lines of a program)
+\fBsource goto.sh --lib\fR              (define the API, take nothing over)
+\fBgoto.sh\fR \fIprog.sh\fR [\fIargs\fR ...]
+\fBgoto.sh \-E\fR \fIprog.sh\fR
+\fBgoto.sh\fR < \fIprog.sh\fR
+\fBgoto.sh \-h\fR | \fB\-V\fR
+\fB#!/path/to/goto.sh\fR                (as a shebang interpreter)
+.fi
+.SH DESCRIPTION
+.B goto.sh
+gives bash programs a real
+.BR goto :
+forward, backward, or computed, with full shell state preserved across
+jumps (no re-exec, no lost variables, no lost file descriptors).
+.PP
+It is a source-to-source compiler. The program is parsed by bash itself
+(via
+.B eval
+into a function body, read back canonically with
+.BR "declare \-f" ),
+scanned, validated, and rewritten into a single
+.B case
+dispatch trampoline in which every
+.B goto
+becomes a pc assignment plus a
+.B continue
+.I N
+computed at compile time. Because the pc is a string dispatched by
+.BR case ,
+computed gotos cost nothing extra.
+.SH PROGRAM SYNTAX
+.TP
+.BI "label " NAME
+Jump target. Must sit at the top level of the program (not inside a loop,
+function, or block), like a C label at function scope.
+.TP
+.BI "# label " NAME\fR,\fB " #: " NAME
+The same, written as a comment.
+.TP
+.BI "goto " NAME
+Jump to the label. Forward, backward, or computed:
+.BR "goto \(dq$dest\(dq" .
+Computed targets must be quoted; static targets are validated at compile
+time, computed ones by the trampoline at run time.
+.TP
+.BI "gosub " NAME " \fR...\fB ret"
+Subroutine call with a real return stack.
+.B gosub
+must be top-level;
+.B ret
+may appear anywhere, including inside loops.
+.PP
+The four words are also defined as ordinary functions, so an uncompiled
+run of the program still parses:
+.B label
+is a no-op and
+.B goto
+reports that the file was never compiled (exit 127).
+.SH OPTIONS
+.TP
+.BR \-E ", " \-\-emit " " \fIprog.sh\fR
+Compile and print the trampoline instead of running it.
+.TP
+.BR \-h ", " \-\-help
+Print the header documentation.
+.TP
+.BR \-V ", " \-\-version
+Print name and version.
+.SH ENVIRONMENT
+.TP
+.B GOTO_EMIT=1
+Print the compiled program to stderr before running it.
+.TP
+.B GOTO_STRICT=0
+Disable the runtime subshell guard (both runtimes). By default a
+.B goto
+executed inside
+.BR "$( )" ,
+.BR "( )" ,
+or a pipeline is a fatal error, because the jump could never reach the
+trampoline.
+.SH EXIT STATUS
+The compiled program's own exit status is propagated, including the
+status of its final command. Otherwise: 2 for compile-time or usage
+errors, 70 when the subshell guard fires (the guarded shell is sent
+SIGTERM, so the observed status is typically 143), 127 from the
+uncompiled
+.B goto
+stub.
+.SH DIAGNOSTICS
+Compile time, each fatal with exit 2:
+.nf
+goto.sh: error: goto to undefined label: NAME
+goto.sh: error: gosub to undefined label: NAME
+goto.sh: error: duplicate label NAME
+goto.sh: error: label NAME is not at the top level of the program
+goto.sh: error: goto target TEXT is not a valid label name
+goto.sh: error: `break` outside any loop would hijack the trampoline
+goto.sh: error: gosub NAME must be at the top level
+goto.sh: syntax error in program: ...
+.fi
+.PP
+Run time:
+.nf
+goto: no such label: NAME            (computed goto miss; exit 2)
+goto: fatal: `goto NAME` executed in a subshell or pipeline
+goto: ret with empty gosub stack     (exit 2)
+.fi
+.SH THE TRAP RUNTIME
+.B goto_trap.sh
+is an independent implementation with no compiler pass:
+.B source goto_trap.sh
+indexes label line numbers, then a DEBUG-trap longjmp (via
+.BR "shopt \-s extdebug" )
+unwinds one frame per command until the tail-eval trampoline re-evaluates
+the program from the target line. It can do the one thing the compiled
+runtime cannot \(em jump out of a called function, including recursive
+ones \(em at the cost of a function call before every command, and it
+owns the DEBUG trap and
+.B extdebug
+for the whole program. Same surface syntax; same subshell guard.
+.SH LIMITATIONS
+Labels must be top-level;
+.B goto
+is function-local (use the trap runtime otherwise); a
+.B goto
+cannot cross a subshell or pipeline; bare
+.BR break / continue
+outside your own loops is rejected;
+.B $LINENO
+and
+.B BASH_SOURCE
+inside the compiled program refer to the eval; reading the program from
+stdin consumes stdin. Names starting with
+.BR __gt_ ,
+.BR __GOTO_ ,
+and
+.B __GT_
+are reserved. Requires bash 5 or newer.
+.SH EXAMPLES
+.nf
+#!/usr/bin/env bash
+source ./goto.sh
+
+i=0
+label top
+echo "iteration $i"
+(( i++ ))
+(( i < 3 )) && goto top
+
+goto "state_$USER_CHOICE"      # computed goto (quoted)
+.fi
+.PP
+Heredoc form, running in the current shell:
+.nf
+source goto.sh --lib
+eval "$(goto_compile <<'EOF'
+\&...program...
+EOF
+)"
+.fi
+.SH BUGS
+Report issues at
+.UR https://github.com/nbritton/bash_goto/issues
+.UE .
+.SH SEE ALSO
+.BR bash (1)
+.SH AUTHOR
+Nikolas Britton
+.SH LICENSE
+MIT

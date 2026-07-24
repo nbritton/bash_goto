@@ -1,0 +1,2 @@
+count=3
+(run with GOTO_EMIT=1 to see what the macros compiled to)

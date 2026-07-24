@@ -1,0 +1,6 @@
+line 1
+line 3
+  helper depth 1
+  helper depth 2
+  helper depth 3
+longjmp'd out of a recursive function
