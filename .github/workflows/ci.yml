@@ -8,7 +8,7 @@ jobs:
   linux:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: run the suite
@@ -17,9 +17,17 @@ jobs:
   macos:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: install bash 5
-        run: brew install bash
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: |
+          brew untap aws/tap 2>/dev/null || true
+          brew list --versions bash || brew install bash
+          "$(brew --prefix)/bin/bash" --version
       - name: run the suite
         run: |
-          "$(brew --prefix)/bin/bash" test/run_tests.sh
+          export PATH="$(brew --prefix)/bin:$PATH"
+          bash --version
+          bash test/run_tests.sh
