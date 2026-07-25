@@ -84,7 +84,7 @@ if (( BASH_VERSINFO[0] < 5 )); then
 	exit 2
 fi
 
-__GT_VERSION='1.0.1'
+__GT_VERSION='1.0.2'
 
 # ---------------------------------------------------------------------------
 # runtime words (also make an *uncompiled* run of the program parse cleanly)
@@ -135,6 +135,168 @@ __gt_die() {
 	exit 2
 }
 
+# Find every live heredoc redirection on one raw source line.  The caller
+# owns __gt_hdq/__gt_hda (lexical state) and the two pending arrays; bash's
+# dynamic scoping lets this helper update them without serializing records.
+__gt_hd_scan() {
+	local l=$1 n=${#1} i=0 c prev next j d dq tab x old
+	while (( i < n )); do
+		c=${l:i:1}
+		if [[ $__gt_hdq == "'" ]]; then
+			[[ $c == "'" ]] && __gt_hdq=
+			(( i++ ))
+			continue
+		elif [[ $__gt_hdq == A ]]; then
+			if [[ $c == '\' ]]; then
+				(( i += 2 ))
+				continue
+			fi
+			[[ $c == "'" ]] && __gt_hdq=
+			(( i++ ))
+			continue
+		elif [[ $__gt_hdq == '"' ]]; then
+			if [[ $c == '\' ]]; then
+				(( i += 2 ))
+				continue
+			elif [[ $c == '$' && ${l:i+1:1} == '(' &&
+			    ${l:i+2:1} != '(' ]]; then
+				(( ++__gt_hds ))
+				__gt_hdr[__gt_hds]='"'
+				__gt_hdq=
+				(( i += 2 ))
+				continue
+			fi
+			[[ $c == '"' ]] && __gt_hdq=
+			(( i++ ))
+			continue
+		fi
+		prev=
+		(( i > 0 )) && prev=${l:i-1:1}
+		case $c in
+		'$')
+			if [[ ${l:i+1:1} == '(' &&
+			    ${l:i+2:1} != '(' ]]; then
+				(( ++__gt_hds ))
+				unset '__gt_hdr[__gt_hds]'
+				(( i++ ))
+			fi
+			;;
+		"'")
+			if [[ $prev == '$' ]]; then
+				__gt_hdq=A
+			else
+				__gt_hdq="'"
+			fi
+			;;
+		'"') __gt_hdq='"' ;;
+		'\') (( i++ )) ;;
+		'#')
+			if (( i == 0 )) ||
+			    [[ $prev == [$' \t;&|()'] ]]; then
+				break
+			fi
+			;;
+		'(')
+			if [[ ${l:i+1:1} == '(' ]]; then
+				(( ++__gt_hda ))
+				(( i++ ))
+			elif (( __gt_hds > 0 )); then
+				(( ++__gt_hds ))
+				unset '__gt_hdr[__gt_hds]'
+			fi
+			;;
+		')')
+			if (( __gt_hda > 0 )) &&
+			    [[ ${l:i+1:1} == ')' ]]; then
+				(( --__gt_hda ))
+				(( i++ ))
+			elif (( __gt_hds > 0 )); then
+				old=$__gt_hds
+				(( --__gt_hds ))
+				if [[ -n ${__gt_hdr[old]+x} ]]; then
+					__gt_hdq=${__gt_hdr[old]}
+					unset '__gt_hdr[old]'
+				fi
+			fi
+			;;
+		'<')
+			if [[ ${l:i+1:1} != '<' ]] ||
+			    [[ ${l:i+2:1} == '<' ]] ||
+			    (( __gt_hda > 0 )); then
+				(( i++ ))
+				continue
+			fi
+			j=$(( i + 2 ))
+			d=
+			dq=
+			tab=
+			if [[ ${l:j:1} == '-' ]]; then
+				tab=1
+				(( j++ ))
+			fi
+			while [[ ${l:j:1} == [' '$'\t'] ]]; do
+				(( j++ ))
+			done
+			while (( j < n )); do
+				x=${l:j:1}
+				if [[ $dq == "'" ]]; then
+					if [[ $x == "'" ]]; then
+						dq=
+					else
+						d+=$x
+					fi
+				elif [[ $dq == A ]]; then
+					if [[ $x == "'" ]]; then
+						dq=
+					elif [[ $x == '\' ]]; then
+						(( j++ ))
+						d+=${l:j:1}
+					else
+						d+=$x
+					fi
+				elif [[ $dq == '"' ]]; then
+					if [[ $x == '"' ]]; then
+						dq=
+					elif [[ $x == '\' ]]; then
+						(( j++ ))
+						d+=${l:j:1}
+					else
+						d+=$x
+					fi
+				else
+					case $x in
+					"'"|'"') dq=$x ;;
+					'$')
+						next=${l:j+1:1}
+						if [[ $next == "'" ]]; then
+							dq=A
+							(( j++ ))
+						elif [[ $next == '"' ]]; then
+							dq='"'
+							(( j++ ))
+						else
+							d+=$x
+						fi
+						;;
+					'\')
+						(( j++ ))
+						d+=${l:j:1}
+						;;
+					[$' \t;&|<>']) break ;;
+					*) d+=$x ;;
+					esac
+				fi
+				(( j++ ))
+			done
+			__gt_hdp+=("$d")
+			__gt_hdpt+=("$tab")
+			i=$(( j - 1 ))
+			;;
+		esac
+		(( i++ ))
+	done
+}
+
 # ---------------------------------------------------------------------------
 # pass 0 - source acquisition + comment-label sugar
 #          `# label foo` / `#: foo` become the real command `label foo`
@@ -144,15 +306,15 @@ __gt_pass0() {
 	# unanchored match would also delete `source ./lib_nogoto.sh`
 	local src_re='^[[:space:]]*(source|\.)[[:space:]]+("|'"'"')?'
 	src_re+='([^"'"'"']*/)?goto(_trap)?\.sh("|'"'"')?[[:space:]]*$'
-	# a heredoc opener, but not the `<<` of an arithmetic left shift
-	local hd_re='<<-?[[:space:]]*("|'"'"'|\\)?([A-Za-z_][A-Za-z0-9_]*)'
-	local hd='' hdtab=''
+	local hd='' hdtab='' hdactive=''
+	local __gt_hdq='' __gt_hda=0 __gt_hds=0
+	local -a __gt_hdp=() __gt_hdpt=() __gt_hdr=()
 	local lbl1_re lbl2_re
 	lbl1_re='^[[:space:]]*#[[:space:]]*label[[:space:]]+'
 	lbl1_re+='([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*$'
 	lbl2_re='^[[:space:]]*#:[[:space:]]*'
 	lbl2_re+='([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*$'
-	local line out='' first=1 chk
+	local line out='' first=1 chk lineq
 	while IFS= read -r line || [[ -n $line ]]; do
 		if (( first )); then
 			first=0
@@ -163,30 +325,49 @@ __gt_pass0() {
 		fi
 		# inside a heredoc body nothing is a command or a comment,
 		# so pass the text through untouched until the delimiter
-		if [[ -n $hd ]]; then
+		if [[ -n $hdactive ]]; then
 			chk=$line
 			if [[ -n $hdtab ]]; then
 				while [[ $chk == $'\t'* ]]; do
 					chk=${chk#$'\t'}
 				done
 			fi
-			[[ $chk == "$hd" ]] && hd=''
+			if [[ $chk == "$hd" ]]; then
+				if (( ${#__gt_hdp[@]} )); then
+					hd=${__gt_hdp[0]}
+					hdtab=${__gt_hdpt[0]}
+					__gt_hdp=("${__gt_hdp[@]:1}")
+					__gt_hdpt=("${__gt_hdpt[@]:1}")
+				else
+					hdactive=
+				fi
+			fi
 			out+="$line"$'\n'
 			continue
 		fi
-		if [[ $line != *'(('* && $line =~ $hd_re ]]; then
-			hd=${BASH_REMATCH[2]}
-			hdtab=''
-			[[ $line == *'<<-'* ]] && hdtab=1
+		lineq=$__gt_hdq
+		if [[ -n $__gt_hdq ]] ||
+		    (( __gt_hda > 0 || __gt_hds > 0 )) ||
+		    [[ $line == *'<'* || $line == *"'"* ||
+		    $line == *'"'* || $line == *'(('* ]]; then
+			__gt_hd_scan "$line"
+		fi
+		if (( ${#__gt_hdp[@]} )); then
+			hd=${__gt_hdp[0]}
+			hdtab=${__gt_hdpt[0]}
+			hdactive=1
+			__gt_hdp=("${__gt_hdp[@]:1}")
+			__gt_hdpt=("${__gt_hdpt[@]:1}")
 		fi
 		# a 'source .../goto.sh' line inside the program itself is
 		# the preamble, not part of the program: drop it so that -E
 		# output is runnable as-is
-		if [[ $line =~ $src_re ]]; then
+		if [[ -z $lineq && $line =~ $src_re ]]; then
 			out+=$'\n'
 			continue
 		fi
-		if [[ $line =~ $lbl1_re || $line =~ $lbl2_re ]]; then
+		if [[ -z $lineq ]] &&
+		    [[ $line =~ $lbl1_re || $line =~ $lbl2_re ]]; then
 			out+="label ${BASH_REMATCH[1]}"$'\n'
 		else
 			out+="$line"$'\n'
@@ -240,9 +421,10 @@ $src
 # ---------------------------------------------------------------------------
 __gt_mask() {
 	local s=$1
-	local n=${#s} i=0 c out='' q='' hd='' hdtab='' chk ln='' j d
-	local arith=0
-	local -a pend=()
+	local n=${#s} i=0 c out='' q='' qret='' hd='' hdtab=''
+	local chk ln='' j d dq x next tab old aq=''
+	local arith=0 arraydepth=0 subdepth=0
+	local -a pend=() pendtab=() subret=()
 	while (( i < n )); do
 		c=${s:i:1}
 		# inside a heredoc body: everything is masked; a line equal
@@ -255,7 +437,15 @@ __gt_mask() {
 						chk=${chk#$'\t'}
 					done
 				fi
-				[[ $chk == "$hd" ]] && hd=
+				if [[ $chk == "$hd" ]]; then
+					hd=
+					if (( ${#pend[@]} )); then
+						hd=${pend[0]}
+						hdtab=${pendtab[0]}
+						pend=("${pend[@]:1}")
+						pendtab=("${pendtab[@]:1}")
+					fi
+				fi
 				out+=$'\n'
 				ln=
 			else
@@ -263,6 +453,76 @@ __gt_mask() {
 				ln+=$c
 			fi
 			(( i++ ))
+			continue
+		fi
+		# Array-assignment values and extglob patterns are words, not
+		# commands.  Parentheses and quotes still need balancing so
+		# scanning resumes at the exact byte after the closing paren.
+		if (( arraydepth > 0 )); then
+			if [[ -n $aq ]]; then
+				if [[ $c == '\' && $aq == '"' ]]; then
+					out+=X
+					(( i++ ))
+					if [[ ${s:i:1} == $'\n' ]]; then
+						out+=$'\n'
+					else
+						out+=X
+					fi
+				else
+					[[ $c == "$aq" ]] && aq=
+					if [[ $c == $'\n' ]]; then
+						out+=$'\n'
+					else
+						out+=X
+					fi
+				fi
+				(( i++ ))
+				continue
+			fi
+			case $c in
+			"'"|'"')
+				aq=$c
+				out+=X
+				;;
+			'\')
+				out+=X
+				(( i++ ))
+				[[ ${s:i:1} == $'\n' ]] &&
+				    out+=$'\n' || out+=X
+				;;
+			'(')
+				(( ++arraydepth ))
+				out+='('
+				;;
+			')')
+				(( --arraydepth ))
+				out+=')'
+				;;
+			$'\n') out+=$'\n' ;;
+			*) out+=X ;;
+			esac
+			(( i++ ))
+			continue
+		fi
+		# Arithmetic is data to the command scanner.  Mask its body so
+		# a variable named `goto` or `done` cannot become compiler
+		# syntax; only the delimiters remain visible.
+		if (( arith > 0 )); then
+			if [[ $c == '(' && ${s:i+1:1} == '(' ]]; then
+				(( ++arith ))
+				out+='(('
+				(( i += 2 ))
+			elif [[ $c == ')' && ${s:i+1:1} == ')' ]]; then
+				(( --arith ))
+				out+='))'
+				(( i += 2 ))
+			elif [[ $c == $'\n' ]]; then
+				out+=$'\n'
+				(( i++ ))
+			else
+				out+=X
+				(( i++ ))
+			fi
 			continue
 		fi
 		# inside a single-quoted string
@@ -281,10 +541,19 @@ __gt_mask() {
 		# inside a `...` command substitution: mask it like a quoted
 		# region so its words never reach the scanner (a goto in there
 		# cannot work anyway - it would run in a subshell - and is
-		# rejected separately by __gt_chk_subst)
+		# rejected separately by __gt_chk_backtick)
 		if [[ $q == '`' ]]; then
-			if [[ $c == '`' ]]; then
-				q=
+			if [[ $c == '\' ]]; then
+				if [[ ${s:i+1:1} == $'\n' ]]; then
+					out+=X$'\n'
+				else
+					out+=XX
+				fi
+				(( i += 2 ))
+				continue
+			elif [[ $c == '`' ]]; then
+				q=$qret
+				qret=
 				out+='`'
 			elif [[ $c == $'\n' ]]; then
 				out+=$'\n'
@@ -303,6 +572,19 @@ __gt_mask() {
 					out+=XX
 				fi
 				(( i += 2 ))
+			elif [[ $c == '$' && ${s:i+1:1} == '(' &&
+			    ${s:i+2:1} != '(' ]]; then
+				out+='$('
+				(( ++subdepth ))
+				subret[subdepth]='"'
+				q=
+				(( i += 2 ))
+				continue
+			elif [[ $c == '`' ]]; then
+				q='`'
+				qret='"'
+				out+='`'
+				(( i++ ))
 			elif [[ $c == '"' ]]; then
 				q=
 				out+='"'
@@ -318,8 +600,28 @@ __gt_mask() {
 		fi
 		# bare code
 		case $c in
-		"'"|'"'|'`')
+		'$')
+			if [[ ${s:i+1:2} == '((' ]]; then
+				out+='$(('
+				(( ++arith ))
+				(( i += 3 ))
+				continue
+			elif [[ ${s:i+1:1} == '(' ]]; then
+				out+='$('
+				(( ++subdepth ))
+				unset 'subret[subdepth]'
+				(( i += 2 ))
+				continue
+			fi
+			out+=$c
+			;;
+		"'"|'"')
 			q=$c
+			out+=$c
+			;;
+		'`')
+			q=$c
+			qret=
 			out+=$c
 			;;
 		'(')
@@ -328,12 +630,18 @@ __gt_mask() {
 			# space, so an unspaced `((` here is always
 			# arithmetic - and inside it, `<<` is a left shift,
 			# not a heredoc.
-			if [[ ${s:i+1:1} == '(' ]]; then
+			if [[ ${s:i-1:1} == [=@+?!*] ]]; then
+				arraydepth=1
+				out+='('
+				(( i++ ))
+				continue
+			elif [[ ${s:i+1:1} == '(' ]]; then
 				(( ++arith ))
 				out+='(('
 				(( i += 2 ))
 				continue
 			fi
+			(( subdepth > 0 )) && (( ++subdepth ))
 			out+=$c
 			;;
 		')')
@@ -344,6 +652,14 @@ __gt_mask() {
 				continue
 			fi
 			out+=$c
+			if (( subdepth > 0 )); then
+				old=$subdepth
+				(( --subdepth ))
+				if [[ -n ${subret[old]+x} ]]; then
+					q=${subret[old]}
+					unset 'subret[old]'
+				fi
+			fi
 			;;
 		'\')
 			out+='\'
@@ -364,23 +680,72 @@ __gt_mask() {
 				fi
 				j=$(( i + 2 ))
 				d=
-				hdtab=
+				dq=
+				tab=
 				if [[ ${s:j:1} == '-' ]]; then
-					hdtab=1
+					tab=1
 					(( j++ ))
 				fi
-				while [[ ${s:j:1} == ' ' ]]; do
+				while [[ ${s:j:1} == [' '$'\t'] ]]; do
 					(( j++ ))
 				done
-				while (( j < n )) &&
-				    [[ ${s:j:1} != [$' \t\n;&|<>'] ]]; do
-					case ${s:j:1} in
-					"'"|'"'|'\') ;;  # quote removal
-					*) d+=${s:j:1} ;;
-					esac
+				while (( j < n )); do
+					x=${s:j:1}
+					if [[ $dq == "'" ]]; then
+						if [[ $x == "'" ]]; then
+							dq=
+						else
+							d+=$x
+						fi
+					elif [[ $dq == A ]]; then
+						if [[ $x == "'" ]]; then
+							dq=
+						elif [[ $x == '\' ]]; then
+							(( j++ ))
+							d+=${s:j:1}
+						else
+							d+=$x
+						fi
+					elif [[ $dq == '"' ]]; then
+						if [[ $x == '"' ]]; then
+							dq=
+						elif [[ $x == '\' ]]; then
+							(( j++ ))
+							d+=${s:j:1}
+						else
+							d+=$x
+						fi
+					else
+						case $x in
+						"'"|'"') dq=$x ;;
+						'$')
+							next=${s:j+1:1}
+							case $next in
+							"'")
+								dq=A
+								(( j++ ))
+								;;
+							'"')
+								dq='"'
+								(( j++ ))
+								;;
+							*)
+								d+=$x
+								;;
+							esac
+							;;
+						'\')
+							(( j++ ))
+							d+=${s:j:1}
+							;;
+						[$' \t\n;&|<>']) break ;;
+						*) d+=$x ;;
+						esac
+					fi
 					(( j++ ))
 				done
 				pend+=("$d")
+				pendtab+=("$tab")
 				out+='<<'
 				(( i += 2 ))
 				continue
@@ -391,7 +756,9 @@ __gt_mask() {
 			out+=$'\n'
 			if (( ${#pend[@]} )); then
 				hd=${pend[0]}
+				hdtab=${pendtab[0]}
 				pend=("${pend[@]:1}")
+				pendtab=("${pendtab[@]:1}")
 				ln=
 			fi
 			;;
@@ -412,7 +779,8 @@ __gt_mask() {
 # ---------------------------------------------------------------------------
 __gt_tokens() {
 	local l=$1
-	local n=${#l} i=0 c tok start cmd=1
+	local n=${#l} i=0 c tok start cmd=1 timing=0 cond=0
+	local assign_re='^[A-Za-z_][A-Za-z0-9_]*(\[[^]]+\])?\+?='
 	while (( i < n )); do
 		c=${l:i:1}
 		case $c in
@@ -426,13 +794,23 @@ __gt_tokens() {
 			(( i++ ))
 			[[ ${l:i:1} == "$c" ]] && { tok+=$c; (( i++ )); }
 			printf '%s %s %s %s\n' "$start" "${#tok}" 0 "$tok"
-			cmd=1
+			if (( cond )); then
+				cmd=0
+			else
+				cmd=1
+				timing=0
+			fi
 			continue
 			;;
 		'('|')'|'{'|'}')
 			printf '%s %s %s %s\n' "$i" 1 0 "$c"
 			(( i++ ))
-			cmd=1
+			if (( cond )); then
+				cmd=0
+			else
+				cmd=1
+				timing=0
+			fi
 			continue
 			;;
 		*)
@@ -445,12 +823,46 @@ __gt_tokens() {
 				(( i++ ))
 			done
 			printf '%s %s %s %s\n' "$start" "${#tok}" "$cmd" "$tok"
+			if (( cond )); then
+				[[ $tok == ']]' ]] && cond=0
+				cmd=0
+				timing=0
+				continue
+			elif (( cmd == 1 )) && [[ $tok == '[[' ]]; then
+				cond=1
+				cmd=0
+				timing=0
+				continue
+			fi
 			# NB: `in` is deliberately absent - the word after
 			# `in` starts a for/select *word list*, which is
 			# data, not a command (`for x in done; ...`)
 			case $tok in
-			'!'|time|then|else|elif|do) cmd=1 ;;
-			*) cmd=0 ;;
+			time)
+				cmd=1
+				timing=1
+				;;
+			-p)
+				if (( timing )); then
+					cmd=1
+				else
+					cmd=0
+				fi
+				;;
+			'!'|coproc|if|while|until|then|else|elif|do)
+				cmd=1
+				timing=0
+				;;
+			*)
+				timing=0
+				if (( cmd > 0 )) &&
+				    [[ $tok =~ $assign_re ||
+				    $tok =~ ^[0-9]*[\<\>] ]]; then
+					cmd=2
+				else
+					cmd=0
+				fi
+				;;
 			esac
 			;;
 		esac
@@ -477,7 +889,7 @@ __gt_classify() {
 		if (( indent != 4 || loops != 0 )); then
 			__gt_err "gosub $name must be at the top level" \
 			    '(it needs a return label)'
-			return 1
+			return 0
 		fi
 		(( ++gsn ))
 		kind[i]="GOSUB $name __gt_ret$gsn"
@@ -491,11 +903,11 @@ __gt_classify() {
 		    'of the program'
 		printf '%16s%s\n' '' \
 		    '(bash cannot jump into a loop, function or block)' >&2
-		return 1
+		return 0
 	fi
 	if [[ -n ${seen[$name]-} ]]; then
 		__gt_err "duplicate label $name"
-		return 1
+		return 0
 	fi
 	seen[$name]=1
 	labels+=("$name")
@@ -516,24 +928,27 @@ __gt_is_pattern() {
 	(( closes > opens ))
 }
 
-# `goto`/`ret`/`gosub` inside a `...` command substitution: the masker has
-# blanked it, so it would silently never be compiled
+# `goto`/`ret`/`gosub` inside a `...` command substitution: the masker
+# blanks its body, so it would silently never be compiled.  Check the
+# full body rather than one line at a time: backticks can span lines and
+# remain active inside double quotes.
 __gt_chk_backtick() {
-	local rest=$sl before after seg
-	[[ $ml == *'`'*'`'* ]] || return 0
-	# walk the masked line for backtick pairs and test the same span
-	# of the real source line
+	local rest=$body before after seg
+	[[ $masked == *'`'*'`'* ]] || return 0
+	# Walk the masked body for live backtick pairs and test the same
+	# span of the real source.  Quoted or escaped literal backticks
+	# are X in the mask and therefore cannot become false positives.
 	local p=0 a b
 	while :; do
-		a=${ml:p}
+		a=${masked:p}
 		[[ $a == *'`'* ]] || break
 		before=${a%%'`'*}
 		(( a = p + ${#before} + 1 ))
-		rest=${ml:a}
+		rest=${masked:a}
 		[[ $rest == *'`'* ]] || break
 		after=${rest%%'`'*}
 		(( b = a + ${#after} ))
-		seg=${sl:a:b-a}
+		seg=${body:a:b-a}
 		if [[ $seg =~ $kw_re ]]; then
 			__gt_err "\`${BASH_REMATCH[2]}\` inside a \`...\`" \
 			    'command substitution can never jump'
@@ -545,12 +960,26 @@ __gt_chk_backtick() {
 	done
 }
 
+# A command word behind an assignment or leading redirection cannot be
+# replaced by a brace group without changing shell syntax and assignment
+# lifetime.  Reject it explicitly instead of silently calling the stub.
+__gt_chk_prefix() {
+	__gt_err "\`$tok\` cannot have an assignment or redirection prefix"
+	printf '%16s%s\n' '' \
+	    "(write the prefix on a separate line before \`$tok\`)" >&2
+}
+
 # `gosub` that survived __gt_classify is not a plain top-level `gosub NAME`,
 # so it would fall through to the uncompiled runtime stub
 __gt_chk_gosub() {
 	__gt_err 'gosub must be a plain `gosub NAME` at the top level'
 	printf '%16s%s\n' '' \
 	    '(it needs a return label, so it cannot be conditional)' >&2
+}
+
+# A `label` that survived __gt_classify is conditional or malformed.
+__gt_chk_label() {
+	__gt_err 'label must be a plain `label NAME` at the top level'
 }
 
 # a bare `break`/`continue` at loop depth 0 would hijack the trampoline
@@ -563,6 +992,13 @@ __gt_chk_stray() {
 
 # rewrite the `ret` token at $off on the current line
 __gt_rw_ret() {
+	local rest=${ml:off+3}
+	rest=${rest#"${rest%%[![:space:]]*}"}
+	if [[ -n $rest && $rest != [';&|)<>']* &&
+	    ! $rest =~ ^[0-9]*[\<\>] ]]; then
+		__gt_err '`ret` takes no arguments'
+		return 0
+	fi
 	local repl="{ __gt_ret; continue $(( loops + 1 )); }"
 	local head=${rewritten:0:off+delta}
 	local tail=${rewritten:off+delta+3}
@@ -588,6 +1024,13 @@ __gt_rw_goto() {
 		return 0
 	fi
 	local target=${sl:toff:tlen} guard=''
+	local rest=${ml:toff+tlen}
+	rest=${rest#"${rest%%[![:space:]]*}"}
+	if [[ -n $rest && $rest != [';&|)<>']* &&
+	    ! $rest =~ ^[0-9]*[\<\>] ]]; then
+		__gt_err '`goto` takes exactly one target'
+		return 0
+	fi
 	# a goto inside a function is function-local, as in C: bash would
 	# reject the emitted `continue` at run time, so reject it here
 	if (( ${#fns[@]} )); then
@@ -602,7 +1045,7 @@ __gt_rw_goto() {
 	local pre=${ml:0:off} po pc
 	po=${pre//[!(]/}
 	pc=${pre//[!)]/}
-	if (( ${#po} > ${#pc} )); then
+	if (( parens + ${#po} > ${#pc} )); then
 		__gt_err 'goto cannot cross a subshell or command' \
 		    'substitution'
 		printf '%16s%s\n' '' \
@@ -651,11 +1094,21 @@ __gt_compile_body() {
 
 	local -a labels=() kind=() gtargets=() gsub_targets=() fns=()
 	local -A seen=()
-	local i loops=0 off len cmd tok errs=0 gsn=0
+	local i loops=0 pendingdo=0 parens=0 off len cmd tok errs=0 gsn=0
+
+	__gt_chk_backtick
 
 	# ---- scan -------------------------------------------------------
 	for (( i = 0; i < ${#src[@]}; i++ )); do
 		local ml=${mask[i]} sl=${src[i]} trimmed indent
+		local po pc prev
+		if (( i > 0 )); then
+			prev=${mask[i-1]}
+			po=${prev//[!(]/}
+			pc=${prev//[!)]/}
+			(( parens += ${#po} - ${#pc} ))
+			(( parens < 0 )) && parens=0
+		fi
 		trimmed=${ml#"${ml%%[![:space:]]*}"}
 		indent=$(( ${#ml} - ${#trimmed} ))
 		kind[i]=CODE
@@ -673,11 +1126,6 @@ __gt_compile_body() {
 			continue
 		fi
 
-		# a `goto`/`ret`/`gosub` in a `...` substitution never reaches
-		# the trampoline; the masker has hidden it, so check the raw
-		# text and say so rather than compiling a silent no-op
-		__gt_chk_backtick
-
 		# a case pattern (`ret)`, `done|x)`) sits at the start of its
 		# own line in canonical output but is data, not a command;
 		# unbalanced closing parens are what distinguishes it
@@ -691,14 +1139,31 @@ __gt_compile_body() {
 		# stray break/continue detection
 		local rewritten=$sl delta=0
 		while read -r off len cmd tok; do
+			if (( cmd == 2 )); then
+				case $tok in
+				label|goto|gosub|ret) __gt_chk_prefix ;;
+				esac
+				continue
+			fi
 			(( cmd == 1 )) || continue
 			case $tok in
-			do) (( ++loops )) ;;
+			for|select|while|until)
+				(( ++loops ))
+				(( ++pendingdo ))
+				;;
+			do)
+				if (( pendingdo > 0 )); then
+					(( --pendingdo ))
+				else
+					(( ++loops ))
+				fi
+				;;
 			done) (( loops > 0 )) && (( loops-- )) ;;
 			break|continue) __gt_chk_stray ;;
 			ret) __gt_rw_ret ;;
 			goto) __gt_rw_goto ;;
 			gosub) __gt_chk_gosub ;;
+			label) __gt_chk_label ;;
 			esac
 		done < <(__gt_tokens "$ml")
 		src[i]=$rewritten

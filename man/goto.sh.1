@@ -1,4 +1,4 @@
-.TH "GOTO.SH" "1" "2026-07-25" "goto.sh 1.0.1" "User Commands"
+.TH "GOTO.SH" "1" "2026-07-25" "goto.sh 1.0.2" "User Commands"
 .SH NAME
 goto.sh, goto_trap.sh \- real forward and backward GOTO for bash
 .SH SYNOPSIS
@@ -46,7 +46,8 @@ The same, written as a comment.
 Jump to the label. Forward, backward, or computed:
 .BR "goto \(dq$dest\(dq" .
 Computed targets must be quoted; static targets are validated at compile
-time, computed ones by the trampoline at run time.
+time, computed ones by the trampoline at run time. The command must not
+have an assignment or leading-redirection prefix.
 .TP
 .BI "gosub " NAME " \fR...\fB ret"
 Subroutine call with a real return stack.
@@ -106,6 +107,10 @@ goto.sh: error: goto cannot cross a subshell or command substitution
 goto.sh: error: `goto` inside a `...` command substitution can never jump
 goto.sh: error: goto inside a function body cannot leave it
 goto.sh: error: `goto` without a target
+goto.sh: error: `goto` takes exactly one target
+goto.sh: error: `ret` takes no arguments
+goto.sh: error: `goto` cannot have an assignment or redirection prefix
+goto.sh: error: label must be a plain `label NAME` at the top level
 goto.sh: error: `break` outside any loop would hijack the trampoline (line: TEXT)
 goto.sh: error: gosub NAME must be at the top level (it needs a return label)
 goto.sh: error: gosub must be a plain `gosub NAME` at the top level
@@ -117,6 +122,9 @@ Run time:
 goto: no such label: NAME            (computed goto miss; exit 2)
 goto: fatal: `goto NAME` executed in a subshell or pipeline
 goto: ret with empty gosub stack     (exit 2)
+goto: missing label                  (trap runtime; exit 2)
+goto: expected exactly one label     (trap runtime; exit 2)
+goto_trap.sh: duplicate label: NAME  (exit 2)
 .fi
 .SH THE TRAP RUNTIME
 .B goto_trap.sh

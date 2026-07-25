@@ -149,4 +149,63 @@ t_rc 'a label inside a heredoc does not capture the jump' 0 "$t_status"
 t_is 'the heredoc body is printed, the real label is used' "$t_out" \
 	$'label loop\nlabel loop\nlabel loop\ndone i=3'
 
+# quoted `<<` text must not hide labels from the indexer
+printf '#!/usr/bin/env bash\nsource "%s"\n' "$trap_sh" \
+	> "$tmp/qhd.sh"
+printf 'echo "<<EOF"\ngoto L\n#: L\necho landed\n' >> "$tmp/qhd.sh"
+t_run bash "$tmp/qhd.sh"
+t_is 'quoted << text is not a heredoc opener' "$t_out" \
+	$'<<EOF\nlanded'
+
+printf '#!/usr/bin/env bash\nsource "%s"\n' "$trap_sh" \
+	> "$tmp/nqhd.sh"
+printf 'echo "$(echo "<<EOF")"\ngoto L\n#: L\necho landed\n' \
+	>> "$tmp/nqhd.sh"
+t_run bash "$tmp/nqhd.sh"
+t_is 'nested quoted << text is not a heredoc opener' "$t_out" \
+	$'<<EOF\nlanded'
+
+# multiple and quoted heredoc delimiters are indexed in source order
+printf '#!/usr/bin/env bash\nsource "%s"\n' "$trap_sh" \
+	> "$tmp/mhd.sh"
+printf 'cat <<A <<B\nfirst\nA\ngoto NOPE\nlabel PHANTOM\n' \
+	>> "$tmp/mhd.sh"
+printf 'second\nB\ngoto REAL\necho NEVER\nlabel REAL\necho landed\n' \
+	>> "$tmp/mhd.sh"
+t_run bash "$tmp/mhd.sh"
+t_rc 'multiple heredocs do not expose false labels' 0 "$t_status"
+t_is 'multiple heredoc bodies stay data in the trap runtime' "$t_out" \
+	$'goto NOPE\nlabel PHANTOM\nsecond\nlanded'
+
+printf '#!/usr/bin/env bash\nsource "%s"\n' "$trap_sh" \
+	> "$tmp/qdelim.sh"
+printf "cat <<'END DOC'\ngoto NOPE\nlabel PHANTOM\nEND DOC\n" \
+	>> "$tmp/qdelim.sh"
+printf 'goto REAL\nlabel REAL\necho landed\n' >> "$tmp/qdelim.sh"
+t_run bash "$tmp/qdelim.sh"
+t_is 'quoted heredoc delimiters may contain spaces' "$t_out" \
+	$'goto NOPE\nlabel PHANTOM\nlanded'
+
+# ambiguous and malformed targets fail before arming a longjmp
+printf '#!/usr/bin/env bash\nsource "%s"\nlabel L\nlabel L\n' \
+	"$trap_sh" > "$tmp/dup.sh"
+t_run bash "$tmp/dup.sh"
+t_rc 'duplicate trap-runtime labels exit 2' 2 "$t_status"
+t_like 'duplicate trap-runtime labels are named' "$t_err" \
+	'goto_trap.sh: duplicate label: L'
+
+printf '#!/usr/bin/env bash\nsource "%s"\ngoto\n' "$trap_sh" \
+	> "$tmp/noarg.sh"
+t_run bash "$tmp/noarg.sh"
+t_rc 'goto without a trap-runtime target exits 2' 2 "$t_status"
+t_like 'goto without a trap-runtime target says so' "$t_err" \
+	'goto: missing label'
+
+printf '#!/usr/bin/env bash\nsource "%s"\nlabel L\ngoto L extra\n' \
+	"$trap_sh" > "$tmp/extra.sh"
+t_run bash "$tmp/extra.sh"
+t_rc 'goto with an extra trap-runtime target exits 2' 2 "$t_status"
+t_like 'goto with an extra trap-runtime target says so' "$t_err" \
+	'goto: expected exactly one label'
+
 t_done

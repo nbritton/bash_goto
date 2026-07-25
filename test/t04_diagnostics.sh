@@ -87,6 +87,14 @@ diag 'goto inside a backtick substitution' \
 	'goto.sh: error: `goto` inside a `...` command substitution' \
 	$'x=`goto lbl`\nlabel lbl\necho hi'
 
+diag 'goto inside a quoted command substitution' \
+	'goto.sh: error: goto cannot cross a subshell or command substitution' \
+	$'x="$(goto lbl)"\nlabel lbl\necho hi'
+
+diag 'goto inside quoted multiline backticks' \
+	'goto.sh: error: `goto` inside a `...` command substitution' \
+	$'x="`echo before\ngoto lbl\necho after`"\nlabel lbl'
+
 diag 'goto inside a function body' \
 	'goto.sh: error: goto inside a function body cannot leave it' \
 	$'f() { goto lbl; }\nf\nlabel lbl\necho hi'
@@ -102,6 +110,22 @@ diag 'conditional gosub is rejected rather than left uncompiled' \
 diag 'a label may not use the reserved namespace' \
 	"goto.sh: error: label __gt_entry uses the compiler's reserved" \
 	$'label __gt_entry\necho hi'
+
+diag 'an assignment-prefixed goto is rejected explicitly' \
+	'cannot have an assignment or redirection prefix' \
+	$'MODE=test goto lbl\nlabel lbl'
+
+diag 'goto takes one target' \
+	'goto.sh: error: `goto` takes exactly one target' \
+	$'goto lbl extra\nlabel lbl'
+
+diag 'ret takes no arguments' \
+	'goto.sh: error: `ret` takes no arguments' \
+	'ret extra'
+
+diag 'a conditional label is rejected explicitly' \
+	'goto.sh: error: label must be a plain `label NAME` at the top level' \
+	$'true && label lbl\ngoto lbl'
 
 t_run bash "$root/goto.sh" -E /nonexistent-program.sh
 t_rc 'a missing -E argument file exits 2' 2 "$t_status"

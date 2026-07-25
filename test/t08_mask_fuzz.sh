@@ -76,7 +76,10 @@ $'cat <<EOF\nEOFX is not the delimiter\ngoto trap\nEOF'
 'x=`echo done`'
 '(( m = 1 << 3 ))'
 '(( n = 8 >> 1 ))'
+'(( goto = done + 1 ))'
 'x=$(( 1 << 2 ))'
+'words=(goto label done)'
+'echo @(goto|done)'
 'echo a\ b'
 $'echo one \\\necho two'
 'echo "${x:-label d}"'
@@ -84,10 +87,12 @@ $'echo one \\\necho two'
 $'cat <<A; cat <<B\ngoto a\nA\nlabel b\nB'
 'for i in 1; do echo done; done'
 'echo "#: fakelabel"'
+'echo "<<NOT_A_HEREDOC"'
 'case done in done) echo m ;; esac'
+$'cat <<\'END DOC\'\ngoto spaced\nEND DOC'
 )
 
-kw_re='(^|[^A-Za-z0-9_])(label|goto|gosub|ret|done)([^A-Za-z0-9_]|$)'
+kw_re='(^|[^A-Za-z0-9_])(label|goto|gosub|ret|do|done)([^A-Za-z0-9_]|$)'
 
 for (( s = first_seed; s < first_seed + count; s++ )); do
 	__mf_state=$s
@@ -100,7 +105,7 @@ for (( s = first_seed; s < first_seed + count; s++ )); do
 	done
 	src=${src%$'\n'}
 	# only fuzz inputs bash itself accepts as a program
-	bash -n <<<"$src" 2> /dev/null || continue
+	bash -O extglob -n <<<"$src" 2> /dev/null || continue
 
 	masked=$(__gt_mask "$src")
 
@@ -169,10 +174,10 @@ src: ${src@Q}"
 
 	# I5 equivalence: compiling a goto-free program changes nothing
 	printf '%s\n' "$src" > "$tmp/p.sh"
-	t_run bash "$tmp/p.sh"
+	t_run bash -O extglob "$tmp/p.sh"
 	plain_out=$t_out
 	plain_rc=$t_status
-	t_run bash "$root/goto.sh" "$tmp/p.sh"
+	t_run bash -O extglob "$root/goto.sh" "$tmp/p.sh"
 	if [[ $t_out == "$plain_out" ]] && (( t_status == plain_rc )); then
 		t_ok "seed $s: compiling a goto-free program is a no-op"
 	else
@@ -186,7 +191,7 @@ src: ${src@Q}"
 	printf '%s\n' "$src" > "$tmp/j.sh"
 	printf 'goto __fz_end\necho FUZZ-NOT-SKIPPED\n' >> "$tmp/j.sh"
 	printf 'label __fz_end\necho fz-ok\n' >> "$tmp/j.sh"
-	t_run bash "$root/goto.sh" "$tmp/j.sh"
+	t_run bash -O extglob "$root/goto.sh" "$tmp/j.sh"
 	want=$plain_out$'\n'fz-ok
 	[[ -z $plain_out ]] && want=fz-ok
 	if [[ $t_out == "$want" ]] && (( t_status == plain_rc )); then

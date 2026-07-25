@@ -178,6 +178,38 @@ t_run bash "$root/goto.sh" "$tmp/hd0.sh"
 t_is 'heredoc bodies survive the comment-label sugar' "$t_out" \
 	$'# label not_a_label\nsource goto.sh\nA\nB'
 
+# quoted `<<` text is not a heredoc opener in pass 0
+printf 'echo "<<EOF"\ngoto L\n#: L\necho reached\n' > "$tmp/qhd.sh"
+t_run bash "$root/goto.sh" "$tmp/qhd.sh"
+t_is 'quoted << text cannot hide a later comment label' "$t_out" \
+	$'<<EOF\nreached'
+
+# every heredoc on a command line is queued and masked in source order
+printf 'cat <<A <<B\nfirst\nA\ngoto NOPE\nlabel PHANTOM\n' \
+	> "$tmp/mhd.sh"
+printf 'second\nB\ngoto REAL\necho NEVER\nlabel REAL\necho landed\n' \
+	>> "$tmp/mhd.sh"
+t_run bash "$root/goto.sh" "$tmp/mhd.sh"
+t_rc 'multiple heredocs compile without scanning their bodies' 0 "$t_status"
+t_is 'multiple heredoc bodies remain data' "$t_out" \
+	$'goto NOPE\nlabel PHANTOM\nsecond\nlanded'
+
+printf "cat <<'END DOC'\ngoto NOPE\nlabel PHANTOM\nEND DOC\n" \
+	> "$tmp/qdelim.sh"
+printf 'goto REAL\necho NEVER\nlabel REAL\necho landed\n' \
+	>> "$tmp/qdelim.sh"
+t_run bash "$root/goto.sh" "$tmp/qdelim.sh"
+t_is 'a quoted heredoc delimiter may contain spaces' "$t_out" \
+	$'goto NOPE\nlabel PHANTOM\nlanded'
+
+# a whole-line comment-looking string inside a multiline quote is data
+printf "%s\n" "echo 'first" '#: not_a_label' "last'" \
+	> "$tmp/mlq.sh"
+printf 'goto L\n#: L\necho landed\n' >> "$tmp/mlq.sh"
+t_run bash "$root/goto.sh" "$tmp/mlq.sh"
+t_is 'pass 0 respects multiline quote state' "$t_out" \
+	$'first\n#: not_a_label\nlast\nlanded'
+
 # an empty or comment-only program is a valid (empty) program
 : > "$tmp/empty.sh"
 t_run bash "$root/goto.sh" "$tmp/empty.sh"
@@ -200,6 +232,60 @@ printf 'set -e\nfalse || goto x\necho NOPE\nlabel x\necho survived\n' \
 t_run bash "$root/goto.sh" "$tmp/q3.sh"
 t_rc 'restoring $? never trips the program errexit' 0 "$t_status"
 t_is 'errexit program survives a || goto' "$t_out" 'survived'
+
+# reserved words put their condition in command position.  Before 1.0.2,
+# these gotos survived compilation and called the runtime stub instead.
+printf 'if goto L; then\necho NEVER\nfi\necho NEVER2\n' > "$tmp/ifg.sh"
+printf 'label L\necho landed\n' >> "$tmp/ifg.sh"
+t_run bash "$root/goto.sh" "$tmp/ifg.sh"
+t_is 'goto in an if condition jumps' "$t_out" 'landed'
+
+printf 'while goto L; do\necho NEVER\ndone\necho NEVER2\n' \
+	> "$tmp/whg.sh"
+printf 'label L\necho landed\n' >> "$tmp/whg.sh"
+t_run bash "$root/goto.sh" "$tmp/whg.sh"
+t_is 'goto in a while condition escapes the loop and trampoline' \
+	"$t_out" 'landed'
+
+# arithmetic identifiers are data even when they use compiler keywords
+printf '(( goto = 1 ))\necho "$goto"\nx=$(( goto + 2 ))\n' \
+	> "$tmp/arithword.sh"
+printf 'echo "$x"\ngoto L\nlabel L\necho landed\n' \
+	>> "$tmp/arithword.sh"
+t_run bash "$root/goto.sh" "$tmp/arithword.sh"
+t_is 'compiler keywords remain valid arithmetic variable names' "$t_out" \
+	$'1\n3\nlanded'
+
+# array-assignment elements are words even when named like compiler syntax
+printf 'words=(goto L done)\nprintf "%%s\\n" "${words[*]}"\n' \
+	> "$tmp/arrayword.sh"
+printf 'goto REAL\nlabel REAL\necho landed\n' >> "$tmp/arrayword.sh"
+t_run bash "$root/goto.sh" "$tmp/arrayword.sh"
+t_is 'compiler keywords remain valid array elements' "$t_out" \
+	$'goto L done\nlanded'
+
+# extglob groups are patterns, and their alternatives are data
+printf 'echo @(goto|done)\ngoto REAL\nlabel REAL\necho landed\n' \
+	> "$tmp/extglob.sh"
+t_run bash -O extglob "$root/goto.sh" "$tmp/extglob.sh"
+t_is 'compiler keywords remain valid extglob alternatives' "$t_out" \
+	$'@(goto|done)\nlanded'
+
+# parentheses and boolean operators inside [[ ]] do not start commands
+printf 'if [[ ( goto == goto && done == done ) ]]; then\n' \
+	> "$tmp/condword.sh"
+printf 'echo yes\nfi\ngoto L\nlabel L\necho landed\n' \
+	>> "$tmp/condword.sh"
+t_run bash "$root/goto.sh" "$tmp/condword.sh"
+t_is 'compiler keywords remain valid [[ expression operands' "$t_out" \
+	$'yes\nlanded'
+
+# `time -p` accepts an option before its command word
+printf 'time -p goto L\necho NEVER\nlabel L\necho landed\n' \
+	> "$tmp/timep.sh"
+t_run bash "$root/goto.sh" "$tmp/timep.sh"
+t_is 'goto after time -p is still in command position' "$t_out" \
+	'landed'
 
 # --- emitted code stands alone, including gosub/ret ----------------------
 ex04=("$root/examples/04_"*.sh)

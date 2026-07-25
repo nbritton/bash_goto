@@ -131,15 +131,19 @@ alias REPEAT_WHILE_UNDER='(( count < 3 )) && goto'
 REPEAT_WHILE_UNDER loop
 ```
 
-**Pass 2 — masking.** Quoted regions and heredoc bodies are replaced with `X`,
-preserving offsets and newlines. This is why `echo done`, a string spanning
-lines that contains the word `label`, and a heredoc containing `goto nowhere`
-are all correctly inert.
+**Pass 2 — masking.** Quoted regions, arithmetic, array-assignment and extglob
+data, and heredoc bodies are replaced with `X`, preserving offsets and
+newlines. Heredoc delimiters are queued in source order, including multiple
+redirections on one command and quoted delimiters containing spaces. This is
+why `echo done`, an array element named `goto`, and a heredoc containing
+`goto nowhere` are all correctly inert.
 
 **Pass 3 — scan and validate.** A small tokenizer walks each masked line
 tracking command position, because `do` and `done` are only keywords as the
-first word of a command (`echo do` must not count). It maintains loop depth,
-rewrites each `goto`, and rejects the things that cannot work.
+first word of a command (`echo do` must not count). It also keeps `[[ ... ]]`
+expression words in data position, maintains loop depth including conditions
+before their `do`, rewrites each `goto`, and rejects the things that cannot
+work.
 
 **Pass 4 — emit.** Segments between labels become `case` branches:
 
@@ -211,6 +215,10 @@ goto.sh: error: goto inside a function body cannot leave it
                 (use goto_trap.sh if you need to jump out of a call)
 goto.sh: error: `goto` inside a `...` command substitution can never jump
 goto.sh: error: `goto` without a target
+goto.sh: error: `goto` takes exactly one target
+goto.sh: error: `ret` takes no arguments
+goto.sh: error: `goto` cannot have an assignment or redirection prefix
+goto.sh: error: label must be a plain `label NAME` at the top level
 goto.sh: error: label start is not at the top level of the program
                 (bash cannot jump into a loop, function or block)
 goto.sh: error: goto target lbl) is not a valid label name
@@ -227,9 +235,9 @@ comparing `BASHPID` against the pid recorded when the trampoline started:
 goto: fatal: `goto a` executed in a subshell or pipeline (pid 26908 != 26891)
 ```
 
-This is checked at run time rather than statically because `( ... )`, `$( ... )`
-and pipelines are exactly the constructs a line-oriented scan gets wrong, and
-`BASHPID` answers the question exactly.
+Obvious subshell and command-substitution cases are rejected at compile time.
+The run-time `BASHPID` check remains the exact backstop for pipelines and other
+child-process contexts.
 
 ## Limitations
 
@@ -251,15 +259,6 @@ and pipelines are exactly the constructs a line-oriented scan gets wrong, and
   program cannot then read from it. Use a filename or the heredoc form.
 * Names starting with `__gt_`, `__GOTO_` (compiled runtime) and `__GT_` (trap
   runtime) are reserved — programs should not define or assign them.
-* An empty program (nothing after the `source` line) is a syntax error, not a
-  no-op.
-* Two heredocs on one line (`cmd <<A <<B`) can produce a spurious compile
-  error (the first line of B's body is briefly scanned as code) — never
-  silent misbehavior.
-* `-E` output runs standalone only when the program doesn't use `gosub`/`ret`
-  (those reference `__gt_ret` from goto.sh).
-* `goto_trap.sh` indexes duplicate labels silently (last one wins); the
-  compiler rejects duplicates.
 * `goto_trap.sh` implements `label`/`goto` only — not `gosub`/`ret` — and its
   labels must be top-level too: the trampoline re-evaluates the program text
   from the label to end of file, so a label inside a loop or block is a
@@ -399,8 +398,7 @@ test/t09_differential.sh   generated control flow, checked against an
 ```
 
 Both are seeded, so a failure reproduces exactly (`test/t09_differential.sh
-47 1` re-runs seed 47 alone), and both fail against 1.0.0 while passing
-against 1.0.1. `make fuzz` runs them deeply.
+47 1` re-runs seed 47 alone). `make fuzz` runs them deeply.
 
 `make bench` prints comparable timing numbers, `CHANGELOG.md` carries the
 release history and known limitations, and `CONTRIBUTING.md` explains the

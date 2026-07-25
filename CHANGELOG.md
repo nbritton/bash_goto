@@ -4,6 +4,56 @@ All notable changes to this project are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.2] - 2026-07-25
+
+A polishing and parser-hardening release. A second full audit concentrated on
+places where Bash syntax distinguishes a command word from data, plus the
+heredoc indexers shared conceptually by the two independent runtimes.
+
+### Fixed
+
+- **`goto` in an `if`, `while`, or `until` condition was left uncompiled.**
+  The tokenizer did not put the word after the reserved opener in command
+  position, so the no-op stub ran and execution fell through. Loop conditions
+  now also contribute to the emitted `continue N` depth before their `do`.
+- **Quoted command substitutions hid jumps from the scanner.**
+  `echo "$(goto target)"` and multiline backticks now receive the same clear
+  subshell diagnostic as their unquoted forms instead of calling the stub.
+- **Arithmetic variables, array elements, extglob alternatives, and `[[ ]]`
+  operands named `goto`, `ret`, or `done` were mistaken for commands.** Those
+  data contexts are now masked or tracked without losing byte offsets.
+- **Multiple heredocs on one command line were consumed out of order.**
+  Every delimiter and its independent `<<-` tab-stripping mode is now queued.
+  Quoted delimiters containing spaces are supported as well.
+- **Quoted `<<` text could hide later comment labels in pass 0 and in
+  `goto_trap.sh`.** The raw-source indexers now track quotes, arithmetic, and
+  nested command substitutions plus all pending heredocs instead of using a
+  single regular-expression match.
+- `time -p goto target` now recognizes `goto` as the timed command.
+- Extra arguments to `goto`/`ret`, conditional or malformed labels, and
+  assignment- or redirection-prefixed control words now fail at compile time
+  with actionable diagnostics instead of producing invalid emitted Bash or
+  falling through to a stub.
+- `goto_trap.sh` now rejects duplicate labels and missing or extra `goto`
+  targets instead of silently choosing the last label, ignoring arguments, or
+  triggering an array error.
+
+### Tests and maintenance
+
+- Added focused unit and regression coverage for command-position state,
+  arithmetic and array data contexts, multiline substitutions, multi-heredoc
+  queues, quoted delimiters, trap-runtime indexing, and the new diagnostics.
+- Expanded the masker fuzzer's fragment corpus with arithmetic keyword
+  variables, array values, extglob patterns, quoted fake openers, and spaced
+  heredoc delimiters.
+- Removed stale README limitations that had already been fixed in 1.0.1
+  (empty programs and standalone `gosub` emission) and documented the current
+  behavior.
+- Added a no-special-syntax fast path to the raw heredoc scanner so ordinary
+  source lines avoid a byte-by-byte pass.
+- Kept the zero-warning lint baseline on ShellCheck 0.11 by documenting the
+  runtime functions invoked indirectly by sourced programs and the DEBUG trap.
+
 ## [1.0.1] - 2026-07-25
 
 A correctness release. A full audit of the 1.0.0 code found several ways a
@@ -189,5 +239,6 @@ page, and packaging.
 - Validation: a program merely *printing* the text `__GOTO_PC=...` inside a
   string literal was rejected as a goto to an undefined label.
 
+[1.0.2]: https://github.com/nbritton/bash_goto/releases/tag/v1.0.2
 [1.0.1]: https://github.com/nbritton/bash_goto/releases/tag/v1.0.1
 [1.0.0]: https://github.com/nbritton/bash_goto/releases/tag/v1.0.0

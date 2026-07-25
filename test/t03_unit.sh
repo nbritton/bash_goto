@@ -44,6 +44,18 @@ t_is 'pass0: label sugar only when the comment is the whole line' \
 got=$(__gt_pass0 < <(printf 'no trailing newline'))
 t_is 'pass0: unterminated final line is kept' "$got" 'no trailing newline'
 
+got=$(__gt_pass0 <<<$'echo "<<EOF"\n#: live')
+t_is 'pass0: quoted << text does not open a heredoc' "$got" \
+	$'echo "<<EOF"\nlabel live'
+
+got=$(__gt_pass0 <<<$'echo "$(echo "<<EOF")"\n#: live')
+t_is 'pass0: nested quoted << text is not a heredoc' "$got" \
+	$'echo "$(echo "<<EOF")"\nlabel live'
+
+got=$(__gt_pass0 <<<$'cat <<A <<B\n#: one\nA\n#: two\nB\n#: live')
+t_is 'pass0: multiple heredoc bodies are left untouched' "$got" \
+	$'cat <<A <<B\n#: one\nA\n#: two\nB\nlabel live'
+
 # --- pass 2: masking ------------------------------------------------------
 mask_in=()
 mask_want=()
@@ -77,6 +89,30 @@ mask_desc+=('quoted heredoc delimiter')
 mask_in+=($'cat <<\'EOF\'\nstuff\nEOF\nafter')
 mask_want+=($'cat <<\'XXX\'\nXXXXX\nXXX\nafter')
 
+mask_desc+=('multiple heredoc bodies')
+mask_in+=($'cat <<A <<B\none\nA\ngoto hidden\nB\nafter')
+mask_want+=($'cat <<A <<B\nXXX\nX\nXXXXXXXXXXX\nX\nafter')
+
+mask_desc+=('quoted heredoc delimiter containing spaces')
+mask_in+=($'cat <<\'END DOC\'\ngoto hidden\nEND DOC\nafter')
+mask_want+=($'cat <<\'XXXXXXX\'\nXXXXXXXXXXX\nXXXXXXX\nafter')
+
+mask_desc+=('ANSI-C quoted heredoc delimiter')
+mask_in+=($'cat <<$\'END DOC\'\ngoto hidden\nEND DOC\nafter')
+mask_want+=($'cat <<$\'XXXXXXX\'\nXXXXXXXXXXX\nXXXXXXX\nafter')
+
+mask_desc+=('command substitution inside double quotes stays scannable')
+mask_in+=($'echo "$(goto hidden)"\nafter')
+mask_want+=($'echo "$(goto hidden)"\nafter')
+
+mask_desc+=('arithmetic bodies are data, not command words')
+mask_in+=($'(( goto = 1 << done ))\nx=$(( ret + 1 ))')
+mask_want+=($'((XXXXXXXXXXXXXXXXXX))\nx=$((XXXXXXXXX))')
+
+mask_desc+=('array assignments and extglobs are data')
+mask_in+=($'words=(goto L done)\necho @(goto|done)\ngoto REAL')
+mask_want+=($'words=(XXXXXXXXXXX)\necho @(XXXXXXXXX)\ngoto REAL')
+
 for (( m = 0; m < ${#mask_in[@]}; m++ )); do
 	got=$(__gt_mask "${mask_in[m]}")
 	t_is "mask: ${mask_desc[m]}" "$got" "${mask_want[m]}"
@@ -91,7 +127,7 @@ done
 # --- tokenizer ------------------------------------------------------------
 got=$(__gt_tokens 'if true; then')
 t_is 'tokens: if true; then' "$got" \
-	$'0 2 1 if\n3 4 0 true\n7 1 0 ;\n9 4 1 then'
+	$'0 2 1 if\n3 4 1 true\n7 1 0 ;\n9 4 1 then'
 
 got=$(__gt_tokens 'echo do')
 t_is 'tokens: "do" as an argument is not command position' "$got" \
@@ -104,6 +140,19 @@ t_is 'tokens: && resets command position' "$got" \
 got=$(__gt_tokens '(x)')
 t_is 'tokens: parens delimit and reset command position' "$got" \
 	$'0 1 0 (\n1 1 1 x\n2 1 0 )'
+
+got=$(__gt_tokens 'MODE=test goto done')
+t_is 'tokens: assignment prefixes are tracked' "$got" \
+	$'0 9 1 MODE=test\n10 4 2 goto\n15 4 0 done'
+
+got=$(__gt_tokens 'time -p goto done')
+t_is 'tokens: time -p keeps command position' "$got" \
+	$'0 4 1 time\n5 2 1 -p\n8 4 1 goto\n13 4 0 done'
+
+got=$(__gt_tokens '[[ ( goto == done ) ]]')
+t_is 'tokens: [[ expression words stay data' "$got" \
+	$'0 2 1 [[\n3 1 0 (\n5 4 0 goto\n10 2 0 ==\n13 4 0 done'\
+$'\n18 1 0 )\n20 2 0 ]]'
 
 # --- pass 1: parse via bash + declare -f ----------------------------------
 got=$(__gt_pass1 'echo    hi')
