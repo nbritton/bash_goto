@@ -12,6 +12,7 @@ file descriptors).
 | front end | bash's own parser, via `declare -f` | label line numbers only |
 | jump out of nested loops | yes (`continue N`, N computed at compile time) | yes |
 | jump out of a called **function** | no (C semantics: goto is function-local) | **yes** |
+| `gosub` / `ret` | yes | no |
 | compile-time diagnostics | yes | no |
 | speed | normal bash speed | slow (trap fires before every command) |
 | footprint | none at runtime | owns the DEBUG trap and `extdebug` |
@@ -19,7 +20,8 @@ file descriptors).
 ## Requirements and installation
 
 GNU bash **5 or newer** — both runtimes check and refuse older bash with a
-clear error. Verified on 5.2.21 and 5.3.0. Neither runtime forks a single
+clear error. CI runs the full suite against bash 5.0, 5.1, 5.2 and 5.3 on
+Linux and against Homebrew bash on macOS. Neither runtime forks a single
 external command, so there are no other dependencies.
 
 Nothing to build:
@@ -27,7 +29,7 @@ Nothing to build:
 ```
 git clone https://github.com/nbritton/bash_goto
 cd bash_goto
-make test            # run the QA suite (383 checks)
+make test            # run the QA suite
 sudo make install    # scripts to /usr/local/bin, man pages installed
 make uninstall       # remove them; PREFIX=... relocates both targets
 ```
@@ -76,7 +78,7 @@ echo "iteration $i"
 | `label NAME` | jump target. Must sit at the top level of the program. |
 | `# label NAME` or `#: NAME` | same thing as a comment (compatible with the ysap style). |
 | `goto NAME` | jump. Forward, backward, or into a variable: `goto "$dest"`. |
-| `gosub NAME` … `ret` | call/return with a real return stack. `gosub` must be top-level; `ret` can be anywhere. |
+| `gosub NAME` … `ret` | call/return with a real return stack (`goto.sh` only). `gosub` must be top-level; `ret` can be anywhere. |
 
 `label`, `goto`, `gosub` and `ret` are also defined as ordinary functions, so an
 *uncompiled* run of the program still parses as valid bash — `label` is a no-op
@@ -145,17 +147,20 @@ rewrites each `goto`, and rejects the things that cannot work.
 declare -g __GOTO_SHELL=$BASHPID __GOTO_PC=__gt_entry
 declare -ga __GOTO_STACK=()
 declare -g __GOTO_RC=0
+__gt_rc() { return "${1:-0}"; }          # restores $? without a fork
 while :; do
   case $__GOTO_PC in
     (__gt_entry)
-      __GOTO_PC=skip          # fall through to the next segment
+      __GOTO_PC=skip                     # fall through to the next segment
+      (( __GOTO_RC == 0 )) || { [[ $- == *e* ]] || __gt_rc "$__GOTO_RC"; }
       echo line 1;
-      { __GOTO_PC=skip; ...; continue 1; }
+      { __GOTO_RC=$?; __GOTO_PC=skip; ...; continue 1; }
       echo "you will never see this";
-      __GOTO_RC=$?            # so falling off the end keeps $?
+      __GOTO_RC=$?                       # so falling off the end keeps $?
       ;;
     (skip)
       __GOTO_PC=__gt_END
+      (( __GOTO_RC == 0 )) || { [[ $- == *e* ]] || __gt_rc "$__GOTO_RC"; }
       echo line 3
       __GOTO_RC=$?
       ;;
@@ -166,14 +171,21 @@ done
 (exit "$__GOTO_RC")
 ```
 
+(The header comment and the subshell guard are elided above; run
+`goto.sh -E prog.sh` for the real thing. The `__GOTO_RC` bookkeeping is what
+makes `$?` transparent across a label boundary and across a `goto` — the
+status a segment ends with is the status the next one starts with, exactly
+as in the same program with the labels deleted.)
+
 Each branch sets the pc to the *next* segment before running, so falling off the
 end of a segment falls through to the following label, exactly like C. Each
 code segment records its last command's status, and the final line replays it,
 so the compiled program's exit status matches what plain bash would give.
 
-`goto X` compiles to `{ __GOTO_PC=X; continue N; }`, where **N is the lexical
-loop-nesting depth plus one**, computed at compile time. That is what makes a
-jump out of two nested `for` loops work: it emits `continue 3`. Wrapping the
+`goto X` compiles to `{ __GOTO_RC=$?; __GOTO_PC=X; <guard> continue N; }`,
+where **N is the lexical loop-nesting depth plus one**, computed at compile
+time (the guard is the subshell check, dropped by `GOTO_STRICT=0`). That is
+what makes a jump out of two nested `for` loops work: it emits `continue 3`. Wrapping the
 jump in `{ ; }` rather than emitting bare statements keeps it correct inside
 `&&`/`||` lists.
 
@@ -193,6 +205,12 @@ Compile time:
 goto.sh: error: goto to undefined label: nowhere
 goto.sh: error: gosub to undefined label: banner
 goto.sh: error: duplicate label a
+goto.sh: error: goto cannot cross a subshell or command substitution
+                (the jump would run in a child process)
+goto.sh: error: goto inside a function body cannot leave it
+                (use goto_trap.sh if you need to jump out of a call)
+goto.sh: error: `goto` inside a `...` command substitution can never jump
+goto.sh: error: `goto` without a target
 goto.sh: error: label start is not at the top level of the program
                 (bash cannot jump into a loop, function or block)
 goto.sh: error: goto target lbl) is not a valid label name
@@ -218,8 +236,9 @@ and pipelines are exactly the constructs a line-oriented scan gets wrong, and
 * **Labels must be at the top level of the program.** You cannot jump into the
   middle of a loop, a function, or a `{ ; }` block — the `case` branch would not
   be syntactically complete. C forbids most of this too.
-* **`goto` is function-local**, as in C. Use `goto_trap.sh` if you need to jump
-  out of a called function.
+* **`goto` is function-local**, as in C — and a `goto` inside a function body
+  is rejected at compile time. Use `goto_trap.sh` if you need to jump out of
+  a called function.
 * **No `goto` across a subshell or pipeline.** Trapped at run time.
 * **Bare `break`/`continue` outside your own loops is rejected**; it would
   hijack the trampoline.
@@ -241,6 +260,19 @@ and pipelines are exactly the constructs a line-oriented scan gets wrong, and
   (those reference `__gt_ret` from goto.sh).
 * `goto_trap.sh` indexes duplicate labels silently (last one wins); the
   compiler rejects duplicates.
+* `goto_trap.sh` implements `label`/`goto` only — not `gosub`/`ret` — and its
+  labels must be top-level too: the trampoline re-evaluates the program text
+  from the label to end of file, so a label inside a loop or block is a
+  syntax error at jump time.
+* In a `goto_trap.sh` program, `declare` at the top level creates a
+  *function-local* variable, because the program body is evaluated inside the
+  trampoline function. Use `declare -g` (plain `x=1` assignments are fine).
+* Under `set -e`, an errexit-triggered exit inside a `goto_trap.sh` program
+  prints two `pop_var_context` lines from bash itself. The exit status is
+  correct; the noise is bash unwinding an `eval` inside a function and cannot
+  be suppressed from the script.
+* `source goto.sh` needs a real file to read the rest of the program from, so
+  `cat prog.sh | bash` cannot work — it is diagnosed, not silently ignored.
 * The shebang-interpreter form (`#!/path/to/goto.sh`) needs a kernel that
   accepts scripts as shebang interpreters: Linux does, macOS does not.
 
@@ -319,18 +351,29 @@ goto.sh                                  the compiler + trampoline runtime
 goto_trap.sh                             the DEBUG-trap longjmp runtime
 examples/                                six runnable demonstrations
 test/run_tests.sh                        QA driver: runs the whole suite
-test/t0*.sh                              sanity, style lint, unit,
-                                         diagnostics, functional, regression
+test/lib.sh                              assertion helpers
+test/t0*.sh                              sanity, style lint, unit, diagnostics,
+                                         functional, regression, trap runtime,
+                                         masker fuzzer, differential fuzzer
+test/bench.sh                            benchmarks (not part of the suite)
+test/gen_golden.sh                       regenerate the golden files
 test/golden/                             pinned outputs and emitted code
 test/fixtures/                           frozen inputs for regression tests
+.github/workflows/ci.yml                 bash 5.0-5.3, macOS, lint, packaging
 man/goto.sh.1                            the manual page
 Makefile                                 test / lint / install / uninstall
-bash-style-guide.md                      the style rules t02 enforces
+bash-style-guide.md                      vendored: Dave Eddy's guide (MIT),
+                                         the style rules t02 enforces
 CHANGELOG.md, CONTRIBUTING.md, LICENSE   release history, dev guide, MIT
+SECURITY.md                              what "it evals your program" implies
 ```
 
 Run them with `bash examples/01_forward_and_backward.sh`, and add
 `GOTO_EMIT=1` to see the generated trampoline for any of them.
+
+The shebang-interpreter form (`#!/path/to/goto.sh`) needs a kernel that
+accepts a script as an interpreter: Linux does, macOS does not, and no kernel
+accepts an interpreter path containing a space.
 
 ## Testing
 
@@ -339,13 +382,29 @@ test/run_tests.sh              # the whole suite (exits nonzero on failure)
 test/run_tests.sh style        # just the files matching "style"
 ```
 
-The suite is 383 assertions: a mechanical style-guide lint (which the
-test files themselves must pass), unit tests for each compiler pass,
-every diagnostic and invocation mode, and byte-exact goldens for the
-emitted trampolines — including emissions of style-variant fixture
-sources, so code generation cannot drift unnoticed. `CHANGELOG.md`
-carries the release history and known limitations; `CONTRIBUTING.md`
-explains the golden-file policy.
+The suite covers a mechanical style-guide lint (which the test files
+themselves must pass), unit tests for each compiler pass, every diagnostic
+and invocation mode, and byte-exact goldens for the emitted trampolines —
+including emissions of style-variant fixture sources, so code generation
+cannot drift unnoticed.
+
+Two files are randomized rather than enumerated, because every silent
+miscompile this project has shipped was a masking bug of a kind that is
+easier to fuzz than to foresee:
+
+```
+test/t08_mask_fuzz.sh      properties of the quote/heredoc masker
+test/t09_differential.sh   generated control flow, checked against an
+                           independent reference interpreter
+```
+
+Both are seeded, so a failure reproduces exactly (`test/t09_differential.sh
+47 1` re-runs seed 47 alone), and both fail against 1.0.0 while passing
+against 1.0.1. `make fuzz` runs them deeply.
+
+`make bench` prints comparable timing numbers, `CHANGELOG.md` carries the
+release history and known limitations, and `CONTRIBUTING.md` explains the
+golden-file policy.
 
 ## License
 

@@ -25,13 +25,19 @@ for tf in t[0-9]*.sh; do
 	rc=$?
 	printf '%s\n' "$out"
 	summarized=0
+	file_pass=0
+	file_fail=0
 	while IFS= read -r line; do
+		# take the last match only: a test program's own output
+		# could otherwise forge a summary line and inflate the total
 		if [[ $line =~ ^#\ pass=([0-9]+)\ fail=([0-9]+)$ ]]; then
-			total_pass=$(( total_pass + BASH_REMATCH[1] ))
-			total_fail=$(( total_fail + BASH_REMATCH[2] ))
+			file_pass=${BASH_REMATCH[1]}
+			file_fail=${BASH_REMATCH[2]}
 			summarized=1
 		fi
 	done <<<"$out"
+	total_pass=$(( total_pass + file_pass ))
+	total_fail=$(( total_fail + file_fail ))
 	if (( rc != 0 || summarized == 0 )); then
 		bad_files+=("$tf")
 	fi

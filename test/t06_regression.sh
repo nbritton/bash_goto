@@ -14,6 +14,7 @@ here=${BASH_SOURCE[0]%/*}
 cd "$here" || exit 1
 source ./lib.sh
 root=..
+rootabs=$(cd "$root" && pwd) || exit 1
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/goto-t.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
@@ -53,6 +54,14 @@ fi
 t_like 'pipeline guard message names the goto' "$t_err" \
 	'goto: fatal: `goto target` executed in a subshell or pipeline'
 t_is 'pipeline guard fires before the jump' "$t_out" 'before'
+
+# the guard's own exit status is 70; the parent normally reports 143
+# because the guard SIGTERMs it, so ignore TERM to observe 70 directly
+t_run bash -c "source '$rootabs/goto.sh' --lib
+trap '' TERM
+__GOTO_SHELL=\$\$
+__gt_fault demo"
+t_rc '__gt_fault exits 70 as the man page documents' 70 "$t_status"
 
 t_run env GOTO_STRICT=0 bash "$root/goto.sh" "$tmp/pipe.sh"
 t_rc 'GOTO_STRICT=0 disables the guard' 0 "$t_status"
@@ -99,8 +108,106 @@ t_is 'literal __GOTO_PC= string runs' "$t_out" $'__GOTO_PC=zzz\nok'
 printf 'x=$(goto lbl)\nlabel lbl\necho hi\n' > "$tmp/csub.sh"
 t_run bash "$root/goto.sh" "$tmp/csub.sh"
 t_rc 'goto inside $( ) is rejected at compile time' 2 "$t_status"
-t_like 'goto inside $( ) explains the target problem' "$t_err" \
-	'is not a valid label name'
+t_like 'goto inside $( ) explains the subshell problem' "$t_err" \
+	'cannot cross a subshell'
+
+# --- 1.0.1 regressions: silent miscompiles found by the 1.0.1 audit -------
+# a left shift is not a heredoc: v1.0.0 masked the rest of the program
+# away here, so labels vanished and gotos were left uncompiled
+printf 'i=0\nlabel top\n(( i++ ))\n(( bit = 1 << i ))\n' > "$tmp/sh1.sh"
+printf 'echo "bit=$bit"\n(( i < 3 )) && goto top\necho end\n' >> "$tmp/sh1.sh"
+t_run bash "$root/goto.sh" "$tmp/sh1.sh"
+t_rc '`<<` inside (( )) is a shift, not a heredoc' 0 "$t_status"
+t_is 'left-shift program runs to completion' "$t_out" \
+	$'bit=2\nbit=4\nbit=8\nend'
+
+# shell keywords used as for-loop words are data, not commands
+kw_words=(goto break continue 'do' 'done' ret gosub)
+for kw in "${kw_words[@]}"; do
+	printf 'for __v in %s x; do\necho "w=$__v"\ndone\n' "$kw" \
+	    > "$tmp/w.sh"
+	printf 'goto z\nlabel z\necho end\n' >> "$tmp/w.sh"
+	t_run bash "$root/goto.sh" "$tmp/w.sh"
+	t_is "\`$kw\` as a for-loop word is data" "$t_out" \
+	    "w=$kw"$'\nw=x\nend'
+done
+
+# a `done` in a word list must not unbalance the loop-depth count, or the
+# emitted `continue N` escapes the wrong number of loops
+printf 'for a in 1; do\nfor i in done; do\necho "inner $i"\n' > "$tmp/dp.sh"
+printf 'goto out\ndone\ndone\necho NOPE\nlabel out\necho out\n' \
+	>> "$tmp/dp.sh"
+t_run bash "$root/goto.sh" "$tmp/dp.sh"
+t_is 'loop depth survives `done` as data' "$t_out" $'inner done\nout'
+
+# case patterns are data too, including ones that used to miscompile
+printf 'x=ret\ncase $x in\nret) echo matched ;;\n*) echo other ;;\nesac\n' \
+	> "$tmp/cp.sh"
+t_run bash "$root/goto.sh" "$tmp/cp.sh"
+t_is 'a `ret)` case pattern compiles and matches' "$t_out" 'matched'
+
+# the caller's IFS must not disable the token scan
+printf '#!/usr/bin/env bash\nIFS=:\nsource "%s"\n' "$rootabs/goto.sh" \
+	> "$tmp/ifs.sh"
+printf 'echo A\ngoto L\necho NEVER\nlabel L\necho B\n' >> "$tmp/ifs.sh"
+t_run bash "$tmp/ifs.sh"
+t_is 'a caller IFS does not disable compilation' "$t_out" $'A\nB'
+
+# nor may nocasematch turn a user command into compiler syntax
+printf '#!/usr/bin/env bash\nshopt -s nocasematch\nsource "%s"\n' \
+	"$rootabs/goto.sh" > "$tmp/nc.sh"
+printf 'Label() { echo "Label ran"; }\necho A\nLabel thing\n' >> "$tmp/nc.sh"
+printf 'label L\necho B\n' >> "$tmp/nc.sh"
+t_run bash "$tmp/nc.sh"
+t_is 'nocasematch does not corrupt the scanner' "$t_out" \
+	$'A\nLabel ran\nB'
+
+# a source line that merely *contains* goto.sh must survive pass 0
+printf 'LIBVAR=loaded\n' > "$tmp/lib_nogoto.sh"
+printf 'echo start\nsource %s/lib_nogoto.sh\n' "$tmp" > "$tmp/srp.sh"
+printf 'echo "v=$LIBVAR"\ngoto e\nlabel e\necho end\n' >> "$tmp/srp.sh"
+t_run bash "$root/goto.sh" "$tmp/srp.sh"
+t_is 'only a real goto.sh preamble line is dropped' "$t_out" \
+	$'start\nv=loaded\nend'
+
+# pass 0 must not rewrite comment labels inside a heredoc body
+printf 'cat <<%s\n# label not_a_label\nsource goto.sh\nEOF\n' "'EOF'" \
+	> "$tmp/hd0.sh"
+printf 'echo A\nlabel L\necho B\n' >> "$tmp/hd0.sh"
+t_run bash "$root/goto.sh" "$tmp/hd0.sh"
+t_is 'heredoc bodies survive the comment-label sugar' "$t_out" \
+	$'# label not_a_label\nsource goto.sh\nA\nB'
+
+# an empty or comment-only program is a valid (empty) program
+: > "$tmp/empty.sh"
+t_run bash "$root/goto.sh" "$tmp/empty.sh"
+t_rc 'an empty program compiles and runs' 0 "$t_status"
+printf '#!/usr/bin/env bash\n# nothing here\n' > "$tmp/cmt.sh"
+t_run bash "$root/goto.sh" "$tmp/cmt.sh"
+t_rc 'a comment-only program compiles and runs' 0 "$t_status"
+
+# --- $? is transparent across a label boundary (new in 1.0.1) ------------
+printf 'false\nlabel after\necho "status=$?"\n' > "$tmp/q1.sh"
+t_run bash "$root/goto.sh" "$tmp/q1.sh"
+t_is 'a label boundary preserves $?' "$t_out" 'status=1'
+
+printf 'false\ngoto x\nlabel x\necho "status=$?"\n' > "$tmp/q2.sh"
+t_run bash "$root/goto.sh" "$tmp/q2.sh"
+t_is 'a goto preserves $?' "$t_out" 'status=1'
+
+printf 'set -e\nfalse || goto x\necho NOPE\nlabel x\necho survived\n' \
+	> "$tmp/q3.sh"
+t_run bash "$root/goto.sh" "$tmp/q3.sh"
+t_rc 'restoring $? never trips the program errexit' 0 "$t_status"
+t_is 'errexit program survives a || goto' "$t_out" 'survived'
+
+# --- emitted code stands alone, including gosub/ret ----------------------
+ex04=("$root/examples/04_"*.sh)
+bash "$root/goto.sh" -E "${ex04[0]}" > "$tmp/sa.sh"
+t_run bash "$tmp/sa.sh"
+t_rc 'emitted gosub program runs standalone' 0 "$t_status"
+t_diff 'standalone gosub output matches the example golden' \
+	'golden/04.out' "$t_out"
 
 # --- exit-status propagation (new in 1.0) ---------------------------------
 printf 'goto e\nlabel e\ntrue\n' > "$tmp/s0.sh"

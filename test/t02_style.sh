@@ -10,6 +10,10 @@ here=${BASH_SOURCE[0]%/*}
 cd "$here" || exit 1
 source ./lib.sh
 root=..
+# the compiler's own masker blanks quoted text, so a pattern like
+# `[ ` or a backtick inside a *string literal* is not mistaken for code
+# shellcheck source=/dev/null
+source "$root/goto.sh" --lib
 
 files=("$root"/goto.sh "$root"/goto_trap.sh "$root"/examples/*.sh ./*.sh)
 
@@ -67,6 +71,12 @@ for f in "${files[@]}"; do
 		# skip pure comment lines for the code-pattern checks
 		trimmed=${line#"${line%%[![:space:]]*}"}
 		[[ $trimmed == '#'* ]] && continue
+		# check the masked line so that quoted text cannot look
+		# like code (this also exercises the masker itself)
+		line=$(__gt_mask "$line")
+		# a line marked POSIX must parse in a POSIX shell, where
+		# [[ ]] does not exist
+		[[ $line == *POSIX* ]] && continue
 		# single-bracket test (allow [[ ... ]])
 		if [[ $line =~ (^|[^\[])\[[[:space:]] ]]; then
 			bad_bracket+=" $lineno"
@@ -153,8 +163,9 @@ done
 
 # when shellcheck is installed, the whole tree must lint clean
 if command -v shellcheck > /dev/null; then
-	t_run shellcheck -S style "${files[@]}"
-	t_rc 'shellcheck -S style is clean on all sources' 0 "$t_status"
+	# same flags as `make lint`, so the two can never disagree
+	t_run shellcheck -x -P SCRIPTDIR -S style "${files[@]}"
+	t_rc 'shellcheck is clean on all sources' 0 "$t_status"
 else
 	t_ok 'shellcheck not installed here - skipped (advisory)'
 fi

@@ -2,36 +2,58 @@
 declare -g __GOTO_SHELL=$BASHPID __GOTO_PC=__gt_entry
 declare -ga __GOTO_STACK=()
 declare -g __GOTO_RC=0
+__gt_rc() { return "${1:-0}"; }
+declare -F __gt_ret > /dev/null || __gt_ret() {
+	if (( ${#__GOTO_STACK[@]} == 0 )); then
+		printf 'goto: ret with empty gosub stack\n' >&2
+		exit 2
+	fi
+	__GOTO_PC=${__GOTO_STACK[-1]}
+	unset '__GOTO_STACK[-1]'
+}
+declare -F __gt_fault > /dev/null || __gt_fault() {
+	printf 'goto: fatal: `goto %s` executed in a subshell or pipeline (pid %s != %s)\n' "$1" "$BASHPID" "$__GOTO_SHELL" >&2
+	kill -0 "$__GOTO_SHELL" 2>/dev/null &&
+	    kill -s TERM "$__GOTO_SHELL" 2>/dev/null
+	exit 70
+}
 while :; do
   case $__GOTO_PC in
     (__gt_entry)
       __GOTO_PC=__gt_ret1
+      (( __GOTO_RC == 0 )) || { [[ $- == *e* ]] || __gt_rc "$__GOTO_RC"; }
+    source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../goto.sh";
     n=3;
       { __GOTO_STACK+=(__gt_ret1); __GOTO_PC=banner; continue 1; }
       ;;
     (__gt_ret1)
       __GOTO_PC=__gt_ret2
+      (( __GOTO_RC == 0 )) || { [[ $- == *e* ]] || __gt_rc "$__GOTO_RC"; }
     echo "main: n=$n";
       { __GOTO_STACK+=(__gt_ret2); __GOTO_PC=square; continue 1; }
       ;;
     (__gt_ret2)
       __GOTO_PC=__gt_ret3
+      (( __GOTO_RC == 0 )) || { [[ $- == *e* ]] || __gt_rc "$__GOTO_RC"; }
     echo "main: got $result";
       { __GOTO_STACK+=(__gt_ret3); __GOTO_PC=banner; continue 1; }
       ;;
     (__gt_ret3)
       __GOTO_PC=banner
-    { __GOTO_PC=done_all; [[ $BASHPID == "$__GOTO_SHELL" ]] || __gt_fault done_all; continue 1; };
+      (( __GOTO_RC == 0 )) || { [[ $- == *e* ]] || __gt_rc "$__GOTO_RC"; }
+    { __GOTO_RC=$?; __GOTO_PC=done_all; [[ $BASHPID == "$__GOTO_SHELL" ]] || __gt_fault done_all; continue 1; };
       __GOTO_RC=$?
       ;;
     (banner)
       __GOTO_PC=square
+      (( __GOTO_RC == 0 )) || { [[ $- == *e* ]] || __gt_rc "$__GOTO_RC"; }
     echo "======================";
     { __gt_ret; continue 1; };
       __GOTO_RC=$?
       ;;
     (square)
       __GOTO_PC=done_all
+      (( __GOTO_RC == 0 )) || { [[ $- == *e* ]] || __gt_rc "$__GOTO_RC"; }
     result=$(( n * n ));
     for k in 1 2;
     do
@@ -43,6 +65,7 @@ while :; do
       ;;
     (done_all)
       __GOTO_PC=__gt_END
+      (( __GOTO_RC == 0 )) || { [[ $- == *e* ]] || __gt_rc "$__GOTO_RC"; }
     echo "finished"
       __GOTO_RC=$?
       ;;

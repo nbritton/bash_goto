@@ -40,6 +40,10 @@ t_is 'file mode preserves "$@"' "$t_out" $'argc=2 argv=alpha b c\narg1=alpha'
 if [[ $OSTYPE == darwin* ]]; then
 	t_ok 'shebang-interpreter mode (skipped: not supported on macOS)'
 	t_ok 'shebang-interpreter output (skipped: not supported on macOS)'
+elif [[ $rootabs == *' '* ]]; then
+	# the kernel truncates a shebang interpreter at the first space
+	t_ok 'shebang-interpreter mode (skipped: space in the repo path)'
+	t_ok 'shebang-interpreter output (skipped: space in the repo path)'
 else
 	printf '#!%s\necho via shebang\ngoto s\necho no\n' \
 		"$rootabs/goto.sh" > "$tmp/sb.sh"

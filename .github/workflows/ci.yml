@@ -3,31 +3,94 @@ name: ci
 on:
   push:
   pull_request:
+  schedule:
+    - cron: '17 4 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
+  # the whole premise of this tool is bash-5-specific behaviour (extdebug
+  # DEBUG-return-2, negative subscripts, BASHPID), so the suite runs
+  # against every bash 5 minor rather than whatever the image ships
   linux:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        bash: ['5.0', '5.1', '5.2', '5.3']
     steps:
       - uses: actions/checkout@v6
-      - name: install shellcheck
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: cache bash ${{ matrix.bash }}
+        id: cache-bash
+        uses: actions/cache@v4
+        with:
+          path: ~/bash-${{ matrix.bash }}
+          key: bash-${{ matrix.bash }}-${{ runner.os }}
+      - name: build bash ${{ matrix.bash }}
+        if: steps.cache-bash.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSLO "https://ftp.gnu.org/gnu/bash/bash-${{ matrix.bash }}.tar.gz"
+          tar xzf "bash-${{ matrix.bash }}.tar.gz"
+          cd "bash-${{ matrix.bash }}"
+          ./configure --prefix="$HOME/bash-${{ matrix.bash }}" > /dev/null
+          make -j"$(nproc)" > /dev/null && make install > /dev/null
       - name: run the suite
-        run: bash test/run_tests.sh
+        run: |
+          export PATH="$HOME/bash-${{ matrix.bash }}/bin:$PATH"
+          bash --version | head -1
+          bash test/run_tests.sh
 
   macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
-      - name: install bash 5
+      - name: install bash 5 and shellcheck
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"
           HOMEBREW_NO_INSTALL_CLEANUP: "1"
         run: |
           brew untap aws/tap 2>/dev/null || true
           brew list --versions bash || brew install bash
-          "$(brew --prefix)/bin/bash" --version
+          brew list --versions shellcheck || brew install shellcheck
       - name: run the suite
         run: |
           export PATH="$(brew --prefix)/bin:$PATH"
-          bash --version
+          bash --version | head -1
           bash test/run_tests.sh
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - run: make lint
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: install into a staging tree
+        run: make install DESTDIR="$PWD/stage"
+      - name: the installed copy compiles a program
+        run: |
+          export PATH="$PWD/stage/usr/local/bin:$PATH"
+          printf 'echo a\ngoto e\necho no\nlabel e\necho b\n' > /tmp/p.sh
+          [ "$(goto.sh /tmp/p.sh)" = "$(printf 'a\nb')" ]
+      - name: uninstall leaves nothing behind
+        run: |
+          make uninstall DESTDIR="$PWD/stage"
+          test -z "$(find stage -type f)"
+
+  # the randomized harnesses run a few seeds in the normal suite; the
+  # nightly schedule runs them deep, where a rare seed can surface
+  fuzz:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: GOTO_FUZZ_N=500 bash test/run_tests.sh

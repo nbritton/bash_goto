@@ -88,11 +88,67 @@ else
 	t_ok 'zsh not installed here - zsh guard check skipped (trap)'
 fi
 
-# --- version ---------------------------------------------------------------
+# --- version is authored in exactly one place ------------------------------
+# __GT_VERSION in goto.sh is the single source of truth; every other copy
+# is checked against it here, so a release bump cannot half-land
+gt_ver=''
+while IFS= read -r vline; do
+	if [[ $vline =~ ^__GT_VERSION=\'([0-9]+\.[0-9]+\.[0-9]+)\'$ ]]; then
+		gt_ver=${BASH_REMATCH[1]}
+		break
+	fi
+done < "$root/goto.sh"
+if [[ -n $gt_ver ]]; then
+	t_ok "__GT_VERSION is set in goto.sh ($gt_ver)"
+else
+	t_not_ok '__GT_VERSION is set in goto.sh'
+fi
+
 t_run bash "$root/goto.sh" -V
 t_rc 'goto.sh -V exits 0' 0 "$t_status"
-t_is 'goto.sh -V prints name and version' "$t_out" 'goto.sh 1.0.0'
+t_is 'goto.sh -V prints name and version' "$t_out" "goto.sh $gt_ver"
 t_run bash "$root/goto.sh" --version
-t_is 'goto.sh --version matches -V' "$t_out" 'goto.sh 1.0.0'
+t_is 'goto.sh --version matches -V' "$t_out" "goto.sh $gt_ver"
+
+th_line=''
+while IFS= read -r vline; do
+	if [[ $vline == .TH\ * ]]; then
+		th_line=$vline
+		break
+	fi
+done < "$root/man/goto.sh.1"
+th_re='^\.TH "GOTO\.SH" "1" "([^"]*)" "goto\.sh ([^"]*)" "[^"]*"$'
+if [[ $th_line =~ $th_re ]]; then
+	th_date=${BASH_REMATCH[1]}
+	t_is 'the man page .TH version matches __GT_VERSION' \
+	    "${BASH_REMATCH[2]}" "$gt_ver"
+else
+	t_not_ok 'the man page .TH line is well formed' "got: ${th_line@Q}"
+	t_not_ok 'the man page .TH version matches __GT_VERSION'
+fi
+
+cl_ver=''
+cl_date=''
+cl_re='^##\ \[([0-9.]+)\]\ -\ ([0-9]{4}-[0-9]{2}-[0-9]{2})$'
+while IFS= read -r vline; do
+	if [[ $vline =~ $cl_re ]]; then
+		cl_ver=${BASH_REMATCH[1]}
+		cl_date=${BASH_REMATCH[2]}
+		break
+	fi
+done < "$root/CHANGELOG.md"
+t_is 'the newest CHANGELOG release matches __GT_VERSION' "$cl_ver" "$gt_ver"
+t_is 'the man page .TH date matches the CHANGELOG release date' \
+	"$th_date" "$cl_date"
+
+cl_ref=''
+while IFS= read -r vline; do
+	[[ $vline == "[$gt_ver]:"*"/tag/v$gt_ver" ]] && cl_ref=$vline
+done < "$root/CHANGELOG.md"
+if [[ -n $cl_ref ]]; then
+	t_ok "the CHANGELOG carries a v$gt_ver tag link"
+else
+	t_not_ok "the CHANGELOG carries a v$gt_ver tag link"
+fi
 
 t_done

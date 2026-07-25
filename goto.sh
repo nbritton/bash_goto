@@ -58,7 +58,9 @@
 
 # sourced by zsh or another non-bash shell?  refuse politely: an `exit`
 # here would close the user's interactive shell (macOS defaults to zsh)
-if [[ -z ${BASH_VERSION-} ]]; then
+# NB: written in POSIX shell on purpose - dash cannot parse [[ ]] and
+# would die here rather than print this message
+if [ -z "${BASH_VERSION:-}" ]; then   # POSIX: dash must parse this
 	printf 'goto.sh: this is a bash tool and cannot run under this\n' >&2
 	printf 'shell; put `source goto.sh` in a bash script, or try:\n' >&2
 	printf '  bash examples/01_forward_and_backward.sh\n' >&2
@@ -82,7 +84,7 @@ if (( BASH_VERSINFO[0] < 5 )); then
 	exit 2
 fi
 
-__GT_VERSION='1.0.0'
+__GT_VERSION='1.0.1'
 
 # ---------------------------------------------------------------------------
 # runtime words (also make an *uncompiled* run of the program parse cleanly)
@@ -112,8 +114,20 @@ __gt_ret() {
 __gt_fault() {
 	printf 'goto: fatal: `goto %s` executed in a subshell' "$1" >&2
 	printf ' or pipeline (pid %s != %s)\n' "$BASHPID" "$__GOTO_SHELL" >&2
-	kill -s TERM "$__GOTO_SHELL" 2>/dev/null
+	# only signal a shell that is still alive: after PID reuse the
+	# recorded pid could belong to something else entirely
+	kill -0 "$__GOTO_SHELL" 2>/dev/null &&
+	    kill -s TERM "$__GOTO_SHELL" 2>/dev/null
 	exit 70
+}
+
+# refuse to continue: exit a script, but merely return in an interactive
+# shell, where exiting would close the user's session
+__gt_refuse() {
+	if [[ $- == *i* ]]; then
+		return 2
+	fi
+	exit 2
 }
 
 __gt_die() {
@@ -126,13 +140,19 @@ __gt_die() {
 #          `# label foo` / `#: foo` become the real command `label foo`
 # ---------------------------------------------------------------------------
 __gt_pass0() {
-	local src_re='^[[:space:]]*(source|\.)[[:space:]].*goto(_trap)?\.sh'
+	# only a *whole* `source .../goto.sh` line is the preamble: an
+	# unanchored match would also delete `source ./lib_nogoto.sh`
+	local src_re='^[[:space:]]*(source|\.)[[:space:]]+("|'"'"')?'
+	src_re+='([^"'"'"']*/)?goto(_trap)?\.sh("|'"'"')?[[:space:]]*$'
+	# a heredoc opener, but not the `<<` of an arithmetic left shift
+	local hd_re='<<-?[[:space:]]*("|'"'"'|\\)?([A-Za-z_][A-Za-z0-9_]*)'
+	local hd='' hdtab=''
 	local lbl1_re lbl2_re
 	lbl1_re='^[[:space:]]*#[[:space:]]*label[[:space:]]+'
 	lbl1_re+='([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*$'
 	lbl2_re='^[[:space:]]*#:[[:space:]]*'
 	lbl2_re+='([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*$'
-	local line out='' first=1
+	local line out='' first=1 chk
 	while IFS= read -r line || [[ -n $line ]]; do
 		if (( first )); then
 			first=0
@@ -140,6 +160,24 @@ __gt_pass0() {
 				out+=$'\n'
 				continue
 			fi
+		fi
+		# inside a heredoc body nothing is a command or a comment,
+		# so pass the text through untouched until the delimiter
+		if [[ -n $hd ]]; then
+			chk=$line
+			if [[ -n $hdtab ]]; then
+				while [[ $chk == $'\t'* ]]; do
+					chk=${chk#$'\t'}
+				done
+			fi
+			[[ $chk == "$hd" ]] && hd=''
+			out+="$line"$'\n'
+			continue
+		fi
+		if [[ $line != *'(('* && $line =~ $hd_re ]]; then
+			hd=${BASH_REMATCH[2]}
+			hdtab=''
+			[[ $line == *'<<-'* ]] && hdtab=1
 		fi
 		# a 'source .../goto.sh' line inside the program itself is
 		# the preamble, not part of the program: drop it so that -E
@@ -161,8 +199,18 @@ __gt_pass0() {
 # pass 1 - parse with bash, read the parse tree back with declare -f
 # ---------------------------------------------------------------------------
 __gt_pass1() {
-	local src=$1 body err line
+	local src=$1 body err line trimmed
 	shopt -s expand_aliases           # give the program cpp-style macros
+	# bash cannot parse a function body that is empty or all comments,
+	# so give an empty program an explicit no-op
+	body=''
+	while IFS= read -r line; do
+		trimmed=${line#"${line%%[![:space:]]*}"}
+		[[ -z $trimmed || $trimmed == '#'* ]] && continue
+		body=1
+		break
+	done <<<"$src"
+	[[ -n $body ]] || src=':'
 	local def="__gt_program() {
 $src
 }"
@@ -193,6 +241,7 @@ $src
 __gt_mask() {
 	local s=$1
 	local n=${#s} i=0 c out='' q='' hd='' hdtab='' chk ln='' j d
+	local arith=0
 	local -a pend=()
 	while (( i < n )); do
 		c=${s:i:1}
@@ -229,6 +278,22 @@ __gt_mask() {
 			(( i++ ))
 			continue
 		fi
+		# inside a `...` command substitution: mask it like a quoted
+		# region so its words never reach the scanner (a goto in there
+		# cannot work anyway - it would run in a subshell - and is
+		# rejected separately by __gt_chk_subst)
+		if [[ $q == '`' ]]; then
+			if [[ $c == '`' ]]; then
+				q=
+				out+='`'
+			elif [[ $c == $'\n' ]]; then
+				out+=$'\n'
+			else
+				out+=X
+			fi
+			(( i++ ))
+			continue
+		fi
 		# inside a double-quoted string
 		if [[ $q == '"' ]]; then
 			if [[ $c == '\' ]]; then
@@ -253,8 +318,31 @@ __gt_mask() {
 		fi
 		# bare code
 		case $c in
-		"'"|'"')
+		"'"|'"'|'`')
 			q=$c
+			out+=$c
+			;;
+		'(')
+			# `((` opens an arithmetic context.  Canonical bash
+			# output writes nested subshells as `( (` with a
+			# space, so an unspaced `((` here is always
+			# arithmetic - and inside it, `<<` is a left shift,
+			# not a heredoc.
+			if [[ ${s:i+1:1} == '(' ]]; then
+				(( ++arith ))
+				out+='(('
+				(( i += 2 ))
+				continue
+			fi
+			out+=$c
+			;;
+		')')
+			if (( arith > 0 )) && [[ ${s:i+1:1} == ')' ]]; then
+				(( --arith ))
+				out+='))'
+				(( i += 2 ))
+				continue
+			fi
 			out+=$c
 			;;
 		'\')
@@ -267,7 +355,8 @@ __gt_mask() {
 			(( i++ ))
 			;;
 		'<')
-			if [[ ${s:i+1:1} == '<' ]]; then
+			# inside (( )) a `<<` is a left shift, not a heredoc
+			if [[ ${s:i+1:1} == '<' ]] && (( arith == 0 )); then
 				if [[ ${s:i+2:1} == '<' ]]; then
 					out+='<<<'  # herestring, no heredoc
 					(( i += 3 ))
@@ -356,8 +445,11 @@ __gt_tokens() {
 				(( i++ ))
 			done
 			printf '%s %s %s %s\n' "$start" "${#tok}" "$cmd" "$tok"
+			# NB: `in` is deliberately absent - the word after
+			# `in` starts a for/select *word list*, which is
+			# data, not a command (`for x in done; ...`)
 			case $tok in
-			'!'|time|then|else|elif|do|in) cmd=1 ;;
+			'!'|time|then|else|elif|do) cmd=1 ;;
 			*) cmd=0 ;;
 			esac
 			;;
@@ -411,6 +503,56 @@ __gt_classify() {
 	return 0
 }
 
+# is the current line a `case` pattern rather than a command?  In canonical
+# bash output a pattern occupies its own line and closes a paren it never
+# opened, which no ordinary command line does.
+__gt_is_pattern() {
+	local rest=${trimmed%)*} opens=0 closes=0 t
+	[[ $trimmed == *')' ]] || return 1
+	t=${trimmed//[!(]/}
+	opens=${#t}
+	t=${trimmed//[!)]/}
+	closes=${#t}
+	(( closes > opens ))
+}
+
+# `goto`/`ret`/`gosub` inside a `...` command substitution: the masker has
+# blanked it, so it would silently never be compiled
+__gt_chk_backtick() {
+	local rest=$sl before after seg
+	[[ $ml == *'`'*'`'* ]] || return 0
+	# walk the masked line for backtick pairs and test the same span
+	# of the real source line
+	local p=0 a b
+	while :; do
+		a=${ml:p}
+		[[ $a == *'`'* ]] || break
+		before=${a%%'`'*}
+		(( a = p + ${#before} + 1 ))
+		rest=${ml:a}
+		[[ $rest == *'`'* ]] || break
+		after=${rest%%'`'*}
+		(( b = a + ${#after} ))
+		seg=${sl:a:b-a}
+		if [[ $seg =~ $kw_re ]]; then
+			__gt_err "\`${BASH_REMATCH[2]}\` inside a \`...\`" \
+			    'command substitution can never jump'
+			printf '%16s%s\n' '' \
+			    '(it runs in a subshell; move it outside)' >&2
+			return 0
+		fi
+		p=$(( b + 1 ))
+	done
+}
+
+# `gosub` that survived __gt_classify is not a plain top-level `gosub NAME`,
+# so it would fall through to the uncompiled runtime stub
+__gt_chk_gosub() {
+	__gt_err 'gosub must be a plain `gosub NAME` at the top level'
+	printf '%16s%s\n' '' \
+	    '(it needs a return label, so it cannot be conditional)' >&2
+}
+
 # a bare `break`/`continue` at loop depth 0 would hijack the trampoline
 __gt_chk_stray() {
 	(( loops == 0 )) || return 0
@@ -432,32 +574,55 @@ __gt_rw_ret() {
 __gt_rw_goto() {
 	local toff=$(( off + len )) tlen=0
 	while [[ ${ml:toff:1} == [' '$'\t'] ]]; do
-		(( toff++ ))
+		(( ++toff ))
 	done
+	# `)` and `(` terminate the target too, so that a goto inside a
+	# command substitution yields a clean diagnostic instead of a
+	# target with a stray paren glued to it
 	while (( toff + tlen < ${#ml} )) &&
-	    [[ ${ml:toff+tlen:1} != [' '$'\t'';&|'] ]]; do
-		(( tlen++ ))
+	    [[ ${ml:toff+tlen:1} != [' '$'\t'';&|()'] ]]; do
+		(( ++tlen ))
 	done
 	if (( tlen == 0 )); then
 		__gt_err '`goto` without a target'
 		return 0
 	fi
 	local target=${sl:toff:tlen} guard=''
-	# a bare target must be a label name; anything else means the goto
-	# sits inside $( )/( ) or the target is an unquoted expansion
+	# a goto inside a function is function-local, as in C: bash would
+	# reject the emitted `continue` at run time, so reject it here
+	if (( ${#fns[@]} )); then
+		__gt_err 'goto inside a function body cannot leave it' \
+		    '(goto is function-local, as in C)'
+		printf '%16s%s\n' '' \
+		    '(use goto_trap.sh if you need to jump out of a call)' >&2
+		return 0
+	fi
+	# an unclosed `(` before the goto means it sits inside $( ) or ( ),
+	# where a jump could never reach the trampoline
+	local pre=${ml:0:off} po pc
+	po=${pre//[!(]/}
+	pc=${pre//[!)]/}
+	if (( ${#po} > ${#pc} )); then
+		__gt_err 'goto cannot cross a subshell or command' \
+		    'substitution'
+		printf '%16s%s\n' '' \
+		    '(the jump would run in a child process)' >&2
+		return 0
+	fi
+	# a bare target must be a label name; anything else means the target
+	# is an unquoted expansion
 	if [[ $target != [\$\"\'\`]* && ! $target =~ $tgt_re ]]; then
 		__gt_err "goto target $target is not a valid label name"
 		printf '%16s%s\n' '' \
-		    '(quote computed targets: goto "$var"; a goto' >&2
-		printf '%16s%s\n' '' \
-		    'cannot cross $( ), ( ) or a pipeline)' >&2
+		    '(quote computed targets: goto "$var")' >&2
 		return 0
 	fi
 	if [[ ${GOTO_STRICT-1} != 0 ]]; then
 		guard='[[ $BASHPID == "$__GOTO_SHELL" ]]'
 		guard+=" || __gt_fault $target; "
 	fi
-	local repl="{ __GOTO_PC=$target; ${guard}continue $(( loops + 1 )); }"
+	local repl="{ __GOTO_RC=\$?; __GOTO_PC=$target;"
+	repl+=" ${guard}continue $(( loops + 1 )); }"
 	local head=${rewritten:0:off+delta}
 	local tail=${rewritten:off+delta+toff+tlen-off}
 	rewritten=$head$repl$tail
@@ -471,6 +636,12 @@ __gt_compile_body() {
 	local gosub_re='^gosub[[:space:]]+([A-Za-z_][A-Za-z0-9_]*);?$'
 	local label_re='^label[[:space:]]+([A-Za-z_][A-Za-z0-9_]*);?$'
 	local tgt_re='^[A-Za-z_][A-Za-z0-9_]*$'
+	local fn_re='^function[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*'
+	fn_re+='\(\)[[:space:]]*$'
+	local kw_re='(^|[^A-Za-z0-9_])(goto|gosub|ret)([[:space:]]|$)'
+	# the token pass reads space-separated records from __gt_tokens, so
+	# it must not inherit a caller's IFS (`local` restores it on return)
+	local IFS=$' \t\n'
 	local body=$1 masked
 	masked=$(__gt_mask "$body")
 
@@ -478,7 +649,7 @@ __gt_compile_body() {
 	mapfile -t src <<<"$body"
 	mapfile -t mask <<<"$masked"
 
-	local -a labels=() kind=() gtargets=() gsub_targets=()
+	local -a labels=() kind=() gtargets=() gsub_targets=() fns=()
 	local -A seen=()
 	local i loops=0 off len cmd tok errs=0 gsn=0
 
@@ -487,9 +658,34 @@ __gt_compile_body() {
 		local ml=${mask[i]} sl=${src[i]} trimmed indent
 		trimmed=${ml#"${ml%%[![:space:]]*}"}
 		indent=$(( ${#ml} - ${#trimmed} ))
+		kind[i]=CODE
+
+		# track nested function definitions: canonical bash renders
+		# them as `function f ()` / `{` / body / `};`, so the header's
+		# indent identifies the closing brace
+		if [[ $trimmed =~ $fn_re ]]; then
+			fns+=("$indent")
+			continue
+		fi
+		if (( ${#fns[@]} )) && [[ $trimmed == '}'* ]] &&
+		    (( indent == fns[-1] )); then
+			unset 'fns[-1]'
+			continue
+		fi
+
+		# a `goto`/`ret`/`gosub` in a `...` substitution never reaches
+		# the trampoline; the masker has hidden it, so check the raw
+		# text and say so rather than compiling a silent no-op
+		__gt_chk_backtick
+
+		# a case pattern (`ret)`, `done|x)`) sits at the start of its
+		# own line in canonical output but is data, not a command;
+		# unbalanced closing parens are what distinguishes it
+		if __gt_is_pattern; then
+			continue
+		fi
 
 		__gt_classify && continue
-		kind[i]=CODE
 
 		# walk the tokens for loop depth, goto/ret rewriting, and
 		# stray break/continue detection
@@ -497,11 +693,12 @@ __gt_compile_body() {
 		while read -r off len cmd tok; do
 			(( cmd == 1 )) || continue
 			case $tok in
-			do) (( loops++ )) ;;
+			do) (( ++loops )) ;;
 			done) (( loops > 0 )) && (( loops-- )) ;;
 			break|continue) __gt_chk_stray ;;
 			ret) __gt_rw_ret ;;
 			goto) __gt_rw_goto ;;
+			gosub) __gt_chk_gosub ;;
 			esac
 		done < <(__gt_tokens "$ml")
 		src[i]=$rewritten
@@ -513,6 +710,18 @@ __gt_compile_body() {
 		(( ++errs ))
 	fi
 	(( errs == 0 )) || return 2
+
+	# a label may not collide with a generated segment name, or the
+	# dispatch would jump to the wrong arm (or loop forever)
+	local lb
+	for lb in "${labels[@]}"; do
+		case $lb in
+		__gt_*|__GOTO_*)
+			__gt_err "label $lb uses the compiler's reserved" \
+			    '__gt_/__GOTO_ namespace'
+			;;
+		esac
+	done
 
 	# every static goto and gosub target must exist
 	local g
@@ -564,11 +773,40 @@ __gt_compile_body() {
 	printf 'declare -g __GOTO_SHELL=$BASHPID __GOTO_PC=__gt_entry\n'
 	printf 'declare -ga __GOTO_STACK=()\n'
 	printf 'declare -g __GOTO_RC=0\n'
+	# emitted so that -E output runs on its own, without goto.sh
+	printf '__gt_rc() { return "${1:-0}"; }\n'
+	if (( gsn > 0 )); then
+		printf 'declare -F __gt_ret > /dev/null || __gt_ret() {\n'
+		printf '\tif (( ${#__GOTO_STACK[@]} == 0 )); then\n'
+		printf '\t\tprintf %s >&2\n' \
+		    "'goto: ret with empty gosub stack\\n'"
+		printf '\t\texit 2\n\tfi\n'
+		printf '\t__GOTO_PC=${__GOTO_STACK[-1]}\n'
+		printf '\tunset %s\n}\n' "'__GOTO_STACK[-1]'"
+	fi
+	if [[ ${GOTO_STRICT-1} != 0 ]]; then
+		local fmt="'goto: fatal: \`goto %s\` executed in a subshell"
+		fmt+=" or pipeline (pid %s != %s)\\n'"
+		printf 'declare -F __gt_fault > /dev/null || __gt_fault() {\n'
+		printf '\tprintf %s "$1" "$BASHPID" "$__GOTO_SHELL" >&2\n' \
+		    "$fmt"
+		printf '\tkill -0 "$__GOTO_SHELL" 2>/dev/null &&\n'
+		printf '\t    kill -s TERM "$__GOTO_SHELL" 2>/dev/null\n'
+		printf '\texit 70\n}\n'
+	fi
 	printf 'while :; do\n  case $__GOTO_PC in\n'
 	for (( i = 0; i < ${#names[@]}; i++ )); do
 		next=__gt_END
 		(( i + 1 < ${#names[@]} )) && next=${names[i+1]}
 		printf '    (%s)\n      __GOTO_PC=%s\n' "${names[i]}" "$next"
+		# restore the status the previous segment ended with, so a
+		# label boundary is transparent to `$?`.  The common case
+		# (status 0) costs one arithmetic test and no function
+		# call.  Skipped under errexit, where re-raising a failure
+		# here would exit a program plain bash would have kept
+		# running.
+		printf '      (( __GOTO_RC == 0 )) ||'
+		printf ' { [[ $- == *e* ]] || __gt_rc "$__GOTO_RC"; }\n'
 		if [[ -n ${bodies[i]//[[:space:]]/} ]]; then
 			printf '%s' "${bodies[i]}"
 			if [[ ${ends[i]} == code ]]; then
@@ -592,14 +830,36 @@ __gt_compile_body() {
 
 # usage: goto_compile [file]    (default stdin) -> compiled bash on stdout
 goto_compile() {
-	local src parsed
+	local src parsed rc=0 restore=''
+	# the scanner matches keywords with `case` and `[[ =~ ]]`, both of
+	# which honour nocasematch; a caller that left it on would turn a
+	# user's `Label`/`Do` command into compiler syntax
+	if shopt -q nocasematch; then
+		restore=1
+		shopt -u nocasematch
+	fi
 	if (( $# )); then
+		if [[ -d $1 ]]; then
+			printf 'goto.sh: %s is a directory\n' "$1" >&2
+			[[ -n $restore ]] && shopt -s nocasematch
+			return 2
+		fi
+		if [[ ! -r $1 ]]; then
+			printf 'goto.sh: cannot read %s\n' "$1" >&2
+			[[ -n $restore ]] && shopt -s nocasematch
+			return 2
+		fi
 		src=$(__gt_pass0 < "$1")
 	else
 		src=$(__gt_pass0)
 	fi
-	parsed=$(__gt_pass1 "$src") || return $?
-	__gt_compile_body "$parsed"
+	if parsed=$(__gt_pass1 "$src"); then
+		__gt_compile_body "$parsed" || rc=$?
+	else
+		rc=$?
+	fi
+	[[ -n $restore ]] && shopt -s nocasematch
+	return $rc
 }
 
 # program text on stdin -> compile and run in the current shell.
@@ -617,6 +877,34 @@ goto_run() {
 if [[ ${BASH_SOURCE[0]} != "$0" ]]; then
 	# `source goto.sh --lib` -- just define goto_compile/goto_run
 	# `source goto.sh`       -- take over the rest of the calling file
+	if [[ ${1-} != --lib ]] && (( ${#FUNCNAME[@]} > 0 )); then
+		# sourced from inside a function: the remainder of the file
+		# is not a program we can take over, and compiling from the
+		# `source` line would re-enter this function forever
+		printf 'goto.sh: `source goto.sh` must be at the top level' >&2
+		printf ' of a script,\n        not inside a function\n' >&2
+		__gt_refuse
+		return $?
+	fi
+	if [[ ${1-} != --lib ]] && (( ${#BASH_SOURCE[@]} > 1 )) &&
+	    [[ ! -r ${BASH_SOURCE[1]} ]]; then
+		# a script fed on stdin (`cat prog.sh | bash`) has no file
+		# for us to read the rest of the program from, so a jump
+		# would silently never be compiled
+		printf 'goto.sh: cannot read the calling script (%s)\n' \
+		    "${BASH_SOURCE[1]:-stdin}" >&2
+		printf '        `source goto.sh` needs a real file: run\n' >&2
+		printf '        `bash prog.sh`, not `cat prog.sh | bash`\n' >&2
+		__gt_refuse
+		return $?
+	fi
+	if [[ ${1-} != --lib ]] && (( ${#BASH_SOURCE[@]} == 1 )); then
+		printf 'goto.sh: `source goto.sh` was not called from a' >&2
+		printf ' script\n        (use --lib for the compiler API'  >&2
+		printf ' alone)\n' >&2
+		__gt_refuse
+		return $?
+	fi
 	if [[ ${1-} != --lib ]] && (( ${#BASH_SOURCE[@]} > 1 )) &&
 	    [[ -r ${BASH_SOURCE[1]} ]]; then
 		mapfile -t __gt_lines < "${BASH_SOURCE[1]}"

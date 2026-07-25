@@ -36,7 +36,8 @@
 
 # sourced by zsh or another non-bash shell?  refuse politely: an `exit`
 # here would close the user's interactive shell (macOS defaults to zsh)
-if [[ -z ${BASH_VERSION-} ]]; then
+# NB: POSIX shell on purpose - dash cannot parse [[ ]]
+if [ -z "${BASH_VERSION:-}" ]; then   # POSIX: dash must parse this
 	printf 'goto_trap.sh: this is a bash tool; source it from the\n' >&2
 	printf 'first line of a bash script\n' >&2
 	return 2 2>/dev/null
@@ -62,17 +63,41 @@ fi
 declare -gA __GT_LBL=()
 __GT_PC=''
 __GT_SHELL=$BASHPID
+__GT_ERREXIT=''
+__GT_FELL=''
 
 # pass 0: index the labels by line number, entirely in bash -- this loop is
 # the whole "compiler"
 mapfile -t __GT_LINES < "$__GT_SRC"
 __gt_lbl_re='^[[:space:]]*(label|#[[:space:]]*label|#:)[[:space:]]+'
-__gt_lbl_re+='([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*$'
+__gt_lbl_re+='([A-Za-z_][A-Za-z0-9_]*);?[[:space:]]*$'
+__gt_hd_re='<<-?[[:space:]]*("|'"'"'|\\)?([A-Za-z_][A-Za-z0-9_]*)'
+__gt_hd=''
+__gt_hdtab=''
 for (( __gt_i = __GT_BASE - 1; __gt_i < ${#__GT_LINES[@]}; __gt_i++ )); do
-	[[ ${__GT_LINES[__gt_i]} =~ $__gt_lbl_re ]] || continue
+	__gt_ln=${__GT_LINES[__gt_i]}
+	# a `label` line inside a heredoc body is text, not a jump target:
+	# indexing it would send the trampoline into the middle of the body
+	if [[ -n $__gt_hd ]]; then
+		__gt_chk=$__gt_ln
+		if [[ -n $__gt_hdtab ]]; then
+			while [[ $__gt_chk == $'\t'* ]]; do
+				__gt_chk=${__gt_chk#$'\t'}
+			done
+		fi
+		[[ $__gt_chk == "$__gt_hd" ]] && __gt_hd=''
+		continue
+	fi
+	if [[ $__gt_ln != *'(('* && $__gt_ln =~ $__gt_hd_re ]]; then
+		__gt_hd=${BASH_REMATCH[2]}
+		__gt_hdtab=''
+		[[ $__gt_ln == *'<<-'* ]] && __gt_hdtab=1
+		continue
+	fi
+	[[ $__gt_ln =~ $__gt_lbl_re ]] || continue
 	__GT_LBL[${BASH_REMATCH[2]}]=$(( __gt_i + 1 ))
 done
-unset -v __gt_i __gt_lbl_re
+unset -v __gt_i __gt_lbl_re __gt_hd_re __gt_hd __gt_hdtab __gt_ln __gt_chk
 
 label() { :; }
 
@@ -85,12 +110,20 @@ goto() {
 		    "$1" >&2
 		printf ' or pipeline (pid %s != %s)\n' \
 		    "$BASHPID" "$__GT_SHELL" >&2
-		kill -s TERM "$__GT_SHELL" 2>/dev/null
+		kill -0 "$__GT_SHELL" 2>/dev/null &&
+		    kill -s TERM "$__GT_SHELL" 2>/dev/null
 		exit 70
 	fi
 	if [[ -z ${__GT_LBL[$1]+x} ]]; then
 		printf 'goto: no such label: %s\n' "$1" >&2
 		exit 2
+	fi
+	# errexit would see the trap's `return 2` as a failing command and
+	# kill the shell mid-unwind; remember it and restore after the jump
+	__GT_ERREXIT=''
+	if [[ $- == *e* ]]; then
+		__GT_ERREXIT=1
+		set +e
 	fi
 	__GT_PC=$1
 }
@@ -102,23 +135,49 @@ __gt_dbg() {
 	return 0
 }
 
-# tail call: evaluate the program text from line $1 to EOF
+# tail call: evaluate the program text from line $1 to EOF.  "$@" after
+# the line number is the program's own argv, so that $1/$@ inside the
+# eval'd text are the script's arguments and not the trampoline's.
 __gt_step() {
-	local __gt_text
+	local __gt_text=''
 	printf -v __gt_text '%s\n' "${__GT_LINES[@]:$1-1}"
+	shift
+	local __gt_rc=0
+	__GT_FELL=''
+	[[ -n $__GT_ERREXIT ]] && set -e
 	eval "$__gt_text"
+	# capture before anything else: this is the program's own status
+	__gt_rc=$?
+	# only reached when the eval ran to the end - a longjmp unwinds
+	# this frame before it, leaving __GT_FELL empty
+	__GT_FELL=1
+	return $__gt_rc
 }
 
 __gt_run() {
-	local line=$__GT_BASE
+	local line=$__GT_BASE rc=0
 	trap '__gt_dbg' DEBUG
 	while :; do
 		__GT_PC=''
-		__gt_step "$line"
+		__gt_step "$line" "$@"
+		rc=$?                          # before any other command
+		set +e                     # keep the trampoline alive
 		[[ -n $__GT_PC ]] || break     # fell off the end: done
+		# a jump was armed but the text ran to completion anyway:
+		# the DEBUG trap that performs the unwind is gone, so the
+		# code this jump should have skipped has just run
+		if [[ -n $__GT_FELL ]]; then
+			printf 'goto: fatal: the DEBUG trap this runtime' >&2
+			printf ' needs was replaced or cleared,\n' >&2
+			printf '      so `goto %s` could not unwind (the' >&2 \
+			    "$__GT_PC"
+			printf ' skipped code has run)\n' >&2
+			exit 70
+		fi
 		line=${__GT_LBL[$__GT_PC]}     # re-eval from the label
 	done
 	trap - DEBUG
+	return $rc
 }
 
 __gt_run "$@"

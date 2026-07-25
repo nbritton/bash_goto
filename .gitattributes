@@ -1,0 +1,11 @@
+# The golden files pin *bytes*, and the style lint asserts tab indentation:
+# a checkout that rewrote line endings would silently fail both.
+* text=auto eol=lf
+*.sh text eol=lf
+test/golden/** -text
+test/fixtures/** -text
+
+# keep release tarballs to the source proper
+.github export-ignore
+.editorconfig export-ignore
+.gitattributes export-ignore

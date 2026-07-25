@@ -1,0 +1,13 @@
+bash-style-guide.md is a verbatim, unmodified copy of the README from
+
+    https://github.com/bahamas10/bash-style-guide
+
+Author:  Dave Eddy <https://daveeddy.com>
+License: MIT (see the "License" section at the end of the document)
+Vendored: 2026-07-24, from upstream master
+
+It is vendored rather than linked so that the style lint in
+test/t02_style.sh checks against a frozen reference that cannot move
+under the tests.
+
+This file is NOT covered by this repository's LICENSE.

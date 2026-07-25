@@ -1,4 +1,4 @@
-.TH "GOTO.SH" "1" "July 2026" "goto.sh 1.0.0" "User Commands"
+.TH "GOTO.SH" "1" "2026-07-25" "goto.sh 1.0.1" "User Commands"
 .SH NAME
 goto.sh, goto_trap.sh \- real forward and backward GOTO for bash
 .SH SYNOPSIS
@@ -60,7 +60,8 @@ run of the program still parses:
 .B label
 is a no-op and
 .B goto
-reports that the file was never compiled (exit 127).
+reports that the file was never compiled (status 127; execution
+continues, since a stub cannot stop the caller).
 .SH OPTIONS
 .TP
 .BR \-E ", " \-\-emit " " \fIprog.sh\fR
@@ -88,8 +89,8 @@ trampoline.
 The compiled program's own exit status is propagated, including the
 status of its final command. Otherwise: 2 for compile-time or usage
 errors, 70 when the subshell guard fires (the guarded shell is sent
-SIGTERM, so the observed status is typically 143), 127 from the
-uncompiled
+SIGTERM, so the status the parent reports is typically 143), and 127
+returned \(em not exited \(em by the uncompiled
 .B goto
 stub.
 .SH DIAGNOSTICS
@@ -99,10 +100,16 @@ goto.sh: error: goto to undefined label: NAME
 goto.sh: error: gosub to undefined label: NAME
 goto.sh: error: duplicate label NAME
 goto.sh: error: label NAME is not at the top level of the program
+goto.sh: error: label NAME uses the compiler's reserved __gt_/__GOTO_ namespace
 goto.sh: error: goto target TEXT is not a valid label name
-goto.sh: error: `break` outside any loop would hijack the trampoline
-goto.sh: error: gosub NAME must be at the top level
-goto.sh: syntax error in program: ...
+goto.sh: error: goto cannot cross a subshell or command substitution
+goto.sh: error: `goto` inside a `...` command substitution can never jump
+goto.sh: error: goto inside a function body cannot leave it
+goto.sh: error: `goto` without a target
+goto.sh: error: `break` outside any loop would hijack the trampoline (line: TEXT)
+goto.sh: error: gosub NAME must be at the top level (it needs a return label)
+goto.sh: error: gosub must be a plain `gosub NAME` at the top level
+goto.sh: syntax error in program:
 .fi
 .PP
 Run time:
@@ -123,11 +130,21 @@ runtime cannot \(em jump out of a called function, including recursive
 ones \(em at the cost of a function call before every command, and it
 owns the DEBUG trap and
 .B extdebug
-for the whole program. Same surface syntax; same subshell guard.
+for the whole program. Same label/goto syntax and the same subshell
+guard, but it does not implement
+.B gosub
+or
+.BR ret ,
+and its labels must also be top level: the trampoline re-evaluates the
+program text from the label to end of file, so a label inside a loop or
+block is a syntax error at jump time.
 .SH LIMITATIONS
 Labels must be top-level;
 .B goto
-is function-local (use the trap runtime otherwise); a
+is function-local and a
+.B goto
+inside a function body is rejected at compile time (use the trap runtime
+if you need to jump out of a call); a
 .B goto
 cannot cross a subshell or pipeline; bare
 .BR break / continue
